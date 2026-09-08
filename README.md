@@ -20,13 +20,13 @@ README makes no empirical or performance claims.
   calibration with diagnostics
 - Offline historical Treasury constant-maturity yields and an optional official
   FRED/H.15 online adapter with a documented fallback
+- Historical Treasury-yield PCA
+- Curve residuals, rolling z-scores, butterfly analytics, and hedging
+- Reproducible charts and tables written to `outputs/`
 
 ## Planned capabilities
 
-- Historical Treasury-yield PCA
-- Curve residuals, rolling z-scores, butterfly analytics, and hedging
 - A historical relative-value backtest with explicit timing and costs
-- Reproducible charts and tables written to `outputs/`
 
 ## Yield-curve data and semantics
 
@@ -58,18 +58,24 @@ python -m pip install -e ".[dev]"
 
 ## Command-line interface
 
-The root script currently provides command placeholders; curve APIs are
-available through the importable package:
+The root script provides composable workflows. Add `--offline` to every
+market-data command to guarantee use of the bundled sample:
 
 ```bash
 python fixed_income_engine.py demo --offline
-python fixed_income_engine.py curve
+python fixed_income_engine.py curve --offline
 python fixed_income_engine.py bond
-python fixed_income_engine.py risk
-python fixed_income_engine.py pca
-python fixed_income_engine.py relative-value
-python fixed_income_engine.py backtest
+python fixed_income_engine.py risk --offline
+python fixed_income_engine.py pca --offline
+python fixed_income_engine.py relative-value --offline
 ```
+
+`demo --offline` fits the latest CMT cross-section with NSS, reports a
+representative bond's YTM analytics, runs full-revaluation curve shocks and
+key-rate DV01, estimates historical yield-change PCA, ranks current fitted-curve
+residuals, and constructs a DV01-neutral 2Y/5Y/10Y butterfly. Curve-risk output
+clearly labels its direct CMT-to-zero-rate proxy as an illustrative assumption,
+not a bootstrap.
 
 ## Development checks
 

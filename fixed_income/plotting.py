@@ -15,6 +15,7 @@ from fixed_income.curves import (
     NSSCalibrationResult,
     nss_yields,
 )
+from fixed_income.pca import PCAResult, interpret_pca_factors
 
 
 def plot_observed_and_fitted_curve(
@@ -138,6 +139,61 @@ def plot_nss_curve(
         title=title,
         ax=ax,
     )
+
+
+def plot_pca_loadings(
+    result: PCAResult,
+    *,
+    n_components: int = 3,
+    ax: Axes | None = None,
+) -> tuple[Figure, Axes]:
+    """Plot leading dimensionless PCA loadings against maturity in years.
+
+    Args:
+        result: Historical yield-change PCA result. Its input yields and changes
+            use decimal annual rates; plotted loadings are dimensionless.
+        n_components: Number of leading components to draw, from one through
+            three and no more than the number of available maturities.
+        ax: Optional Matplotlib axes on which to draw.
+
+    Returns:
+        The Matplotlib figure and axes. Suggested level/slope/curvature labels
+        are displayed only when the quantitative shape diagnostic supports
+        them. No file is written automatically; a later CLI workflow can call
+        :func:`save_figure` with ``outputs/pca_loadings.png``.
+    """
+    if not isinstance(result, PCAResult):
+        raise TypeError("result must be a PCAResult")
+    if isinstance(n_components, bool) or not isinstance(n_components, int):
+        raise TypeError("n_components must be an integer")
+    available = result.loadings.shape[1]
+    if n_components < 1 or n_components > min(3, available):
+        raise ValueError(f"n_components must be between one and {min(3, available)}")
+    if ax is None:
+        figure, axes = plt.subplots(figsize=(8.0, 5.0), constrained_layout=True)
+    else:
+        axes = ax
+        figure = axes.figure
+
+    diagnostics = interpret_pca_factors(result, max_components=n_components)
+    for component, diagnostic in enumerate(diagnostics):
+        label = f"PC{component + 1}"
+        if diagnostic.suggested_label is not None:
+            label += f" ({diagnostic.suggested_label})"
+        axes.plot(
+            result.maturities_years,
+            result.loadings[:, component],
+            marker="o",
+            linewidth=1.8,
+            label=label,
+        )
+    axes.axhline(0.0, color="black", linewidth=0.8, alpha=0.5)
+    axes.set_xlabel("Maturity (years)")
+    axes.set_ylabel("Loading (dimensionless)")
+    axes.set_title("Historical yield-change PCA loadings")
+    axes.grid(visible=True, alpha=0.25)
+    axes.legend()
+    return figure, axes
 
 
 def save_figure(figure: Figure, output_path: str | Path) -> Path:

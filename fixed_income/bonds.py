@@ -345,6 +345,40 @@ def clean_price_from_ytm(
     return dirty_price - accrued_interest(bond, settlement_date)
 
 
+def price_from_ytm(
+    bond: FixedRateBond,
+    settlement_date: date,
+    ytm: float,
+    *,
+    price_type: PriceType | str,
+) -> float:
+    """Price a bond from a single conventional YTM, in currency units.
+
+    Args:
+        bond: Bond terms; face value and returned price are currency amounts.
+        settlement_date: Calendar settlement date before maturity.
+        ytm: Decimal nominal annual yield compounded at coupon frequency.
+        price_type: Explicitly ``"clean"`` or ``"dirty"``. There is no
+            default, preventing an implicit clean/dirty-price choice.
+
+    Returns:
+        Clean or dirty currency price, as explicitly selected by
+        ``price_type``.
+
+    Notes:
+        This entry point uses a single YTM for every cash flow. Spot-curve
+        discounting is deliberately exposed separately as
+        :func:`fixed_income.risk.price_from_curve`.
+    """
+    try:
+        normalized_price_type = PriceType(price_type)
+    except ValueError as exc:
+        raise ValueError("price_type must be explicitly 'clean' or 'dirty'") from exc
+    if normalized_price_type is PriceType.DIRTY:
+        return dirty_price_from_ytm(bond, settlement_date, ytm)
+    return clean_price_from_ytm(bond, settlement_date, ytm)
+
+
 def yield_to_maturity(
     bond: FixedRateBond,
     settlement_date: date,
@@ -754,5 +788,6 @@ __all__ = [
     "generate_fixed_rate_cash_flows",
     "macaulay_duration",
     "modified_duration",
+    "price_from_ytm",
     "yield_to_maturity",
 ]

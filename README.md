@@ -14,6 +14,8 @@ README makes no empirical or performance claims.
 - Yield-to-maturity, duration, convexity, and DV01
 - Tagged curve representations, zero-rate interpolation, and explicit
   continuous, periodic, or simple-compounding discount factors
+- Spot-curve bond pricing, parallel and shaped full-revaluation scenarios, and
+  localized 2Y/5Y/10Y/30Y key-rate DV01 reports
 - Explicit Nelson-Siegel-Svensson evaluation and bounded multi-start
   calibration with diagnostics
 - Offline historical Treasury constant-maturity yields and an optional official
@@ -21,7 +23,6 @@ README makes no empirical or performance claims.
 
 ## Planned capabilities
 
-- Key-rate risk and shaped curve shocks
 - Historical Treasury-yield PCA
 - Curve residuals, rolling z-scores, butterfly analytics, and hedging
 - A historical relative-value backtest with explicit timing and costs

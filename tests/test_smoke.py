@@ -30,6 +30,55 @@ def test_cli_help_runs() -> None:
     assert "backtest" in result.stdout
 
 
+def test_offline_backtest_cli_reports_metrics_and_writes_artifacts() -> None:
+    """The configurable offline CLI reports metrics and saves outputs."""
+    project_root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [
+            sys.executable,
+            "fixed_income_engine.py",
+            "backtest",
+            "--offline",
+            "--lookback",
+            "40",
+            "--entry-z",
+            "1.75",
+            "--exit-z",
+            "0.25",
+            "--transaction-cost-bp",
+            "0.02",
+        ],
+        cwd=project_root,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env={**os.environ, "MPLBACKEND": "Agg"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    for label in (
+        "Sample date range:",
+        "Observations:",
+        "Methodology summary:",
+        "Gross cumulative P&L:",
+        "Net cumulative P&L:",
+        "Annualised volatility (gross / net):",
+        "Sharpe on approximate P&L (gross / net):",
+        "Maximum drawdown (gross / net):",
+        "Turnover:",
+        "Hit rate on active intervals (gross / net):",
+        "Number of trades (entries):",
+        "Transaction-cost assumption:",
+    ):
+        assert label in result.stdout
+    assert "Transaction-cost assumption: 0.02 bp" in result.stdout
+    for filename in ("rv_backtest.csv", "rv_backtest.png"):
+        artifact = project_root / "outputs" / filename
+        assert artifact.is_file()
+        assert artifact.stat().st_size > 0
+
+
 def test_offline_demo_runs_end_to_end() -> None:
     """The offline demo runs without a network call and writes useful artifacts."""
     project_root = Path(__file__).resolve().parents[1]
@@ -49,12 +98,15 @@ def test_offline_demo_runs_end_to_end() -> None:
     assert "Representative fixed-rate bond" in result.stdout
     assert "Historical yield-change PCA" in result.stdout
     assert "Current relative value" in result.stdout
+    assert "Historical relative-value research backtest" in result.stdout
     for filename in (
         "yield_curve.png",
         "pca_loadings.png",
         "bond_risk_report.csv",
         "key_rate_dv01.csv",
         "relative_value_report.csv",
+        "rv_backtest.csv",
+        "rv_backtest.png",
     ):
         artifact = project_root / "outputs" / filename
         assert artifact.is_file()

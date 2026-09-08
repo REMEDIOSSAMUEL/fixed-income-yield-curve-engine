@@ -115,7 +115,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="non-negative absolute z-score exit threshold (default: 0.5)",
     )
     backtest_parser.add_argument(
+        "--transaction-cost-bp",
         "--transaction-cost-bps-per-face",
+        dest="transaction_cost_bp",
         type=float,
         default=0.01,
         help="one-way cost in bp of traded face notional (default: 0.01)",
@@ -156,9 +158,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 min_observations=args.min_observations,
                 entry_z=args.entry_z,
                 exit_z=args.exit_z,
-                transaction_cost_bps_per_face=(
-                    args.transaction_cost_bps_per_face
-                ),
+                transaction_cost_bps_per_face=args.transaction_cost_bp,
             )
         else:
             run_relative_value_workflow(offline=args.offline)

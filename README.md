@@ -67,6 +67,8 @@ python fixed_income_engine.py risk --offline
 python fixed_income_engine.py pca --offline
 python fixed_income_engine.py relative-value --offline
 python fixed_income_engine.py backtest --offline
+python fixed_income_engine.py backtest --offline --lookback 40 --entry-z 1.75 \
+  --exit-z 0.25 --transaction-cost-bp 0.02
 ```
 
 The backtest is a first-order yield-change P&L study on non-tradable Treasury
@@ -81,7 +83,9 @@ representative bond's YTM analytics, runs full-revaluation curve shocks and
 key-rate DV01, estimates historical yield-change PCA, ranks current fitted-curve
 residuals, and constructs a DV01-neutral 2Y/5Y/10Y butterfly. Curve-risk output
 clearly labels its direct CMT-to-zero-rate proxy as an illustrative assumption,
-not a bootstrap.
+not a bootstrap. The demo finishes with a concise historical relative-value
+backtest summary and writes `outputs/rv_backtest.csv` and
+`outputs/rv_backtest.png`.
 
 ## Development checks
 

@@ -415,6 +415,7 @@ def run_backtest_workflow(
     entry_z: float = 2.0,
     exit_z: float = 0.5,
     transaction_cost_bps_per_face: float = 0.01,
+    concise: bool = False,
 ) -> BacktestResult:
     """Run and save the historical 5Y NSS-residual research backtest.
 
@@ -427,6 +428,8 @@ def run_backtest_workflow(
         exit_z: Non-negative dimensionless exit threshold below ``entry_z``.
         transaction_cost_bps_per_face: One-way cost in bp of face traded, with
             one bp explicitly equal to ``0.0001`` of currency face.
+        concise: If true, print a compact demo summary instead of the full
+            backtest report; this flag has no financial units.
 
     Returns:
         Dated sensitivity-based approximate currency P&L and summary metrics.
@@ -462,20 +465,7 @@ def run_backtest_workflow(
     )
     paths = save_backtest_outputs(result, sensitivity)
 
-    print("\nHistorical relative-value research backtest")
-    print("-------------------------------------------")
-    print(result.methodology)
-    print("Metrics are based on approximate currency P&L, not percentage returns.")
-    print(
-        result.metrics.to_string(
-            float_format=lambda value: f"{value:,.6f}"
-        )
-    )
-    print("\nLimitations")
-    for limitation in result.limitations:
-        print(f"- {limitation}")
-    for path in paths:
-        print(f"Saved: {_relative_path(path)}")
+    _print_backtest_summary(result, paths, concise=concise)
     return result
 
 
@@ -498,6 +488,93 @@ def run_demo_workflow(*, offline: bool) -> None:
     run_risk_workflow(offline=offline, state=state)
     run_pca_workflow(offline=offline, state=state)
     run_relative_value_workflow(offline=offline, state=state)
+    run_backtest_workflow(offline=offline, concise=True)
+
+
+def _print_backtest_summary(
+    result: BacktestResult,
+    paths: tuple[Path, Path, Path],
+    *,
+    concise: bool,
+) -> None:
+    """Print backtest results whose P&L, drawdown, and turnover are currency."""
+    observations = result.observations
+    metrics = result.metrics
+    start = observations.index[0].date().isoformat()
+    end = observations.index[-1].date().isoformat()
+    gross = metrics["gross"]
+    net = metrics["net"]
+    trade_count = int(net["number_of_entries"])
+    if concise:
+        print("\nHistorical relative-value research backtest")
+        print(
+            f"{start} to {end} | {len(observations)} observations | "
+            f"gross P&L {gross['cumulative_pnl_currency_approx']:,.2f} | "
+            f"net P&L {net['cumulative_pnl_currency_approx']:,.2f} | "
+            f"{trade_count} trades"
+        )
+        print(
+            "Saved: "
+            f"{_relative_path(paths[0])}, {_relative_path(paths[1])}"
+        )
+        return
+
+    print("\nHistorical relative-value research backtest")
+    print("-------------------------------------------")
+    print(f"Sample date range: {start} to {end}")
+    print(f"Observations: {len(observations)}")
+    print(f"Methodology summary: {result.methodology}")
+    print("Metrics use approximate currency P&L, not percentage returns.")
+    print(
+        "Gross cumulative P&L: "
+        f"{gross['cumulative_pnl_currency_approx']:,.2f} currency"
+    )
+    print(
+        "Net cumulative P&L: "
+        f"{net['cumulative_pnl_currency_approx']:,.2f} currency"
+    )
+    print(
+        "Annualised volatility (gross / net): "
+        f"{gross['annualised_volatility_currency_approx']:,.2f} / "
+        f"{net['annualised_volatility_currency_approx']:,.2f} currency"
+    )
+    print(
+        "Sharpe on approximate P&L (gross / net): "
+        f"{_format_optional_metric(gross['sharpe_ratio_on_approx_pnl'])} / "
+        f"{_format_optional_metric(net['sharpe_ratio_on_approx_pnl'])}"
+    )
+    print(
+        "Maximum drawdown (gross / net): "
+        f"{gross['maximum_drawdown_currency']:,.2f} / "
+        f"{net['maximum_drawdown_currency']:,.2f} currency"
+    )
+    print(
+        "Turnover: "
+        f"{net['turnover_abs_notional_currency']:,.2f} currency face"
+    )
+    print(
+        "Hit rate on active intervals (gross / net): "
+        f"{_format_optional_percentage(gross['hit_rate_active_intervals'])} / "
+        f"{_format_optional_percentage(net['hit_rate_active_intervals'])}"
+    )
+    print(f"Number of trades (entries): {trade_count}")
+    print(
+        "Transaction-cost assumption: "
+        f"{result.config.transaction_cost_bps_per_face:g} bp per unit of "
+        "absolute face traded, one way (1 bp = 0.0001)"
+    )
+    for path in paths:
+        print(f"Saved: {_relative_path(path)}")
+
+
+def _format_optional_metric(value: float) -> str:
+    """Format a dimensionless metric, returning ``n/a`` when not finite."""
+    return f"{value:,.4f}" if np.isfinite(value) else "n/a"
+
+
+def _format_optional_percentage(value: float) -> str:
+    """Format a dimensionless fraction as a percentage or ``n/a``."""
+    return f"{value * 100.0:.1f}%" if np.isfinite(value) else "n/a"
 
 
 def _print_curve_summary(state: MarketState) -> None:

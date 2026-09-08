@@ -27,6 +27,7 @@ def test_cli_help_runs() -> None:
     assert result.returncode == 0
     assert "demo" in result.stdout
     assert "relative-value" in result.stdout
+    assert "backtest" in result.stdout
 
 
 def test_offline_demo_runs_end_to_end() -> None:

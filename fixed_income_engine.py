@@ -8,6 +8,7 @@ from datetime import date
 
 from fixed_income.bonds import FixedRateBond
 from fixed_income.workflows import (
+    run_backtest_workflow,
     run_bond_workflow,
     run_curve_workflow,
     run_demo_workflow,
@@ -85,6 +86,40 @@ def build_parser() -> argparse.ArgumentParser:
         "relative-value", help="Rank current residuals and build the 2s5s10s fly"
     )
     _add_offline_argument(relative_value_parser)
+    backtest_parser = subparsers.add_parser(
+        "backtest", help="Run the historical 5Y NSS-residual research backtest"
+    )
+    _add_offline_argument(backtest_parser)
+    backtest_parser.add_argument(
+        "--lookback",
+        type=int,
+        default=60,
+        help="preceding observations used for signal estimates (default: 60)",
+    )
+    backtest_parser.add_argument(
+        "--min-observations",
+        type=int,
+        default=None,
+        help="minimum preceding observations (default: full lookback)",
+    )
+    backtest_parser.add_argument(
+        "--entry-z",
+        type=float,
+        default=2.0,
+        help="positive absolute z-score entry threshold (default: 2.0)",
+    )
+    backtest_parser.add_argument(
+        "--exit-z",
+        type=float,
+        default=0.5,
+        help="non-negative absolute z-score exit threshold (default: 0.5)",
+    )
+    backtest_parser.add_argument(
+        "--transaction-cost-bps-per-face",
+        type=float,
+        default=0.01,
+        help="one-way cost in bp of traded face notional (default: 0.01)",
+    )
     return parser
 
 
@@ -114,6 +149,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             run_risk_workflow(offline=args.offline)
         elif args.command == "pca":
             run_pca_workflow(offline=args.offline)
+        elif args.command == "backtest":
+            run_backtest_workflow(
+                offline=args.offline,
+                lookback=args.lookback,
+                min_observations=args.min_observations,
+                entry_z=args.entry_z,
+                exit_z=args.exit_z,
+                transaction_cost_bps_per_face=(
+                    args.transaction_cost_bps_per_face
+                ),
+            )
         else:
             run_relative_value_workflow(offline=args.offline)
     except (ArithmeticError, OSError, RuntimeError, TypeError, ValueError) as exc:

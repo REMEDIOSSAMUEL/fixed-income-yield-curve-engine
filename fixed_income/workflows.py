@@ -17,6 +17,15 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from fixed_income.backtest import (
+    BacktestConfig,
+    BacktestResult,
+    calculate_par_proxy_unit_dv01,
+    fit_historical_nss_residuals,
+    run_relative_value_backtest,
+    save_backtest_outputs,
+    transaction_cost_sensitivity,
+)
 from fixed_income.bonds import (
     FixedRateBond,
     PriceType,
@@ -398,6 +407,78 @@ def run_relative_value_workflow(
     return rankings, butterfly
 
 
+def run_backtest_workflow(
+    *,
+    offline: bool,
+    lookback: int = 60,
+    min_observations: int | None = None,
+    entry_z: float = 2.0,
+    exit_z: float = 0.5,
+    transaction_cost_bps_per_face: float = 0.01,
+) -> BacktestResult:
+    """Run and save the historical 5Y NSS-residual research backtest.
+
+    Args:
+        offline: If true, use only bundled Treasury CMT observations.
+        lookback: Number of preceding observations in rolling signal estimates.
+        min_observations: Required preceding residual count; ``None`` uses the
+            full lookback.
+        entry_z: Positive dimensionless absolute entry threshold.
+        exit_z: Non-negative dimensionless exit threshold below ``entry_z``.
+        transaction_cost_bps_per_face: One-way cost in bp of face traded, with
+            one bp explicitly equal to ``0.0001`` of currency face.
+
+    Returns:
+        Dated sensitivity-based approximate currency P&L and summary metrics.
+        This is research output, not a return series or deployable strategy.
+    """
+    dataset = load_treasury_yields(
+        offline=offline,
+        fallback_to_offline=True,
+        missing=MissingValuePolicy.DROP,
+    )
+    yields = dataset.yields
+    residuals = fit_historical_nss_residuals(yields, failure_policy="nan")
+    five_year_residual = residuals["5Y"].rename("5Y NSS residual")
+    unit_dv01 = calculate_par_proxy_unit_dv01(yields)
+    config = BacktestConfig(
+        lookback=lookback,
+        min_observations=min_observations,
+        entry_z=entry_z,
+        exit_z=exit_z,
+        transaction_cost_bps_per_face=transaction_cost_bps_per_face,
+    )
+    result = run_relative_value_backtest(
+        yields,
+        five_year_residual,
+        unit_dv01,
+        config=config,
+    )
+    sensitivity = transaction_cost_sensitivity(
+        yields,
+        five_year_residual,
+        unit_dv01,
+        config=config,
+    )
+    paths = save_backtest_outputs(result, sensitivity)
+
+    print("\nHistorical relative-value research backtest")
+    print("-------------------------------------------")
+    print(result.methodology)
+    print("Metrics are based on approximate currency P&L, not percentage returns.")
+    print(
+        result.metrics.to_string(
+            float_format=lambda value: f"{value:,.6f}"
+        )
+    )
+    print("\nLimitations")
+    for limitation in result.limitations:
+        print(f"- {limitation}")
+    for path in paths:
+        print(f"Saved: {_relative_path(path)}")
+    return result
+
+
 def run_demo_workflow(*, offline: bool) -> None:
     """Run the end-to-end demo using decimal rates and currency prices.
 
@@ -516,6 +597,7 @@ __all__ = [
     "load_market_state",
     "representative_bond",
     "run_bond_workflow",
+    "run_backtest_workflow",
     "run_curve_workflow",
     "run_demo_workflow",
     "run_pca_workflow",

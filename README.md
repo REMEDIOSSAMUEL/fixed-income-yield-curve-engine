@@ -22,11 +22,9 @@ README makes no empirical or performance claims.
   FRED/H.15 online adapter with a documented fallback
 - Historical Treasury-yield PCA
 - Curve residuals, rolling z-scores, butterfly analytics, and hedging
+- A historical 5Y NSS-residual research backtest with lagged signals,
+  time-varying DV01-neutral hedge weights, and cost sensitivity
 - Reproducible charts and tables written to `outputs/`
-
-## Planned capabilities
-
-- A historical relative-value backtest with explicit timing and costs
 
 ## Yield-curve data and semantics
 
@@ -68,7 +66,15 @@ python fixed_income_engine.py bond
 python fixed_income_engine.py risk --offline
 python fixed_income_engine.py pca --offline
 python fixed_income_engine.py relative-value --offline
+python fixed_income_engine.py backtest --offline
 ```
+
+The backtest is a first-order yield-change P&L study on non-tradable Treasury
+constant-maturity observations. It is not a percentage-return series, a
+deployable strategy, or evidence of live profitability. It omits true security
+prices, cash/futures bid-ask data, carry, roll, convexity, financing, funding,
+and market impact; its configurable bp-of-face transaction costs are only a
+simple sensitivity assumption.
 
 `demo --offline` fits the latest CMT cross-section with NSS, reports a
 representative bond's YTM analytics, runs full-revaluation curve shocks and

@@ -18,12 +18,24 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
-    "pytest-cov>=5.0",
+    "pytest-cov>=7.0",
     "ruff>=0.6",
 ]
 
 [tool.setuptools.packages.find]
 include = ["fixed_income*"]
+namespaces = false
+
+[tool.setuptools.package-data]
+fixed_income = ["sample_data/*.csv"]
+
+[tool.coverage.run]
+data_file = "outputs/.coverage"
+patch = ["subprocess"]
+
+[tool.coverage.report]
+precision = 2
+show_missing = true
 
 [tool.pytest.ini_options]
 addopts = "--strict-config --strict-markers"

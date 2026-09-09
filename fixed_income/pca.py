@@ -244,7 +244,7 @@ def fit_yield_change_pca(
         decomposition_matrix = covariance
     else:
         scales = centered.std(axis=0, ddof=1)
-        near_zero = scales <= np.finfo(float).eps
+        near_zero = scales == 0.0
         if np.any(near_zero):
             zero_columns = [str(labels[index]) for index in np.flatnonzero(near_zero)]
             raise ValueError(
@@ -260,7 +260,9 @@ def fit_yield_change_pca(
     order = np.argsort(eigenvalues, kind="stable")[::-1]
     eigenvalues = eigenvalues[order]
     loadings = loadings[:, order]
-    tolerance = np.finfo(float).eps * max(1.0, float(np.max(np.abs(eigenvalues)))) * 100
+    # Variance is in squared decimal yields; an absolute unit-sized floor would
+    # reject valid small-scale samples and break PCA's scaling identity.
+    tolerance = np.finfo(float).eps * float(np.max(np.abs(eigenvalues))) * 100
     if np.any(eigenvalues < -tolerance):
         raise ArithmeticError("PCA decomposition produced materially negative variance")
     eigenvalues = np.maximum(eigenvalues, 0.0)

@@ -11,7 +11,7 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from enum import StrEnum
 
 import numpy as np
@@ -83,6 +83,11 @@ class YieldCurve:
             raise ValueError("maturities_years and values must have equal length")
         if maturities.size == 0:
             raise ValueError("a curve must contain at least one node")
+        if self.valuation_date is not None and (
+            isinstance(self.valuation_date, datetime)
+            or not isinstance(self.valuation_date, date)
+        ):
+            raise TypeError("valuation_date must be a date without a time component")
         if np.any(maturities <= 0.0):
             raise ValueError("maturities_years must be strictly positive")
         if np.any(np.diff(maturities) <= 0.0):
@@ -120,6 +125,18 @@ class YieldCurve:
             values <= 0.0
         ):
             raise ValueError("discount factors must be strictly positive")
+        if representation is not CurveRepresentation.DISCOUNT_FACTOR:
+            if np.any(np.abs(values) > 1.0):
+                raise ValueError(
+                    "curve values must be decimal annual rates within [-1, 1]"
+                )
+        if zero_representation:
+            zero_rates_to_discount_factors(
+                maturities,
+                values,
+                compounding=self.compounding,
+                periodic_frequency=self.periodic_frequency,
+            )
 
     def discount_factors(
         self,
@@ -177,7 +194,15 @@ class NSSParameters:
 
 @dataclass(frozen=True)
 class NSSCalibrationDiagnostics:
-    """Numerical optimizer diagnostics for an NSS calibration."""
+    """Optimizer diagnostics; conditioning is dimensionless, bounds are names.
+
+    ``loading_condition_number`` measures identification of the conditional beta
+    regression. ``jacobian_condition_number`` uses unit-norm Jacobian columns
+    so decimal-beta and year-tau scales do not alone drive the comparison.
+    Negligible derivative columns give infinite condition before normalization;
+    rescaling numerical noise cannot identify the taus of a flat curve.
+    Convergence does not imply parameter identification or a global optimum.
+    """
 
     success: bool
     status: int
@@ -188,6 +213,10 @@ class NSSCalibrationDiagnostics:
     starts_attempted: int
     successful_starts: int
     best_start_index: int
+    loading_condition_number: float
+    jacobian_condition_number: float
+    active_bounds: tuple[str, ...]
+    failed_start_messages: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -320,6 +349,33 @@ def nelson_siegel_svensson(
     )
 
 
+def nss_yield_jacobian(
+    maturities_years: Sequence[float] | np.ndarray,
+    parameters: NSSParameters | Sequence[float],
+) -> np.ndarray:
+    """Differentiate decimal NSS yields with respect to all six parameters.
+
+    Maturities and taus are years; betas are decimal annual rates. Returns an
+    (n, 6) matrix in beta0, beta1, beta2, beta3, tau1, tau2 order. Beta columns
+    are dimensionless and tau columns are decimal annual yield per year of tau.
+    Writing x=t/tau, s=(1-exp(-x))/x and c=s-exp(-x), the derivatives are
+    ds/dtau=c/tau and dc/dtau=(c-x*exp(-x))/tau, with zero limits at t=0.
+    """
+    validated = validate_nss_parameters(parameters)
+    maturities = _as_finite_1d(maturities_years, "maturities_years")
+    loadings = nss_loadings(maturities, validated.tau1, validated.tau2)
+    x1 = maturities / validated.tau1
+    x2 = maturities / validated.tau2
+    tau1_derivative = (
+        validated.beta1 * loadings[:, 2]
+        + validated.beta2 * (loadings[:, 2] - x1 * np.exp(-x1))
+    ) / validated.tau1
+    tau2_derivative = (
+        validated.beta3 * (loadings[:, 3] - x2 * np.exp(-x2)) / validated.tau2
+    )
+    return np.column_stack((loadings, tau1_derivative, tau2_derivative))
+
+
 def calibrate_nss(
     maturities_years: Sequence[float] | np.ndarray,
     observed_yields: Sequence[float] | np.ndarray,
@@ -338,7 +394,10 @@ def calibrate_nss(
             with maturities. Published percentages must be converted before
             calling this function.
         weights: Optional strictly positive dimensionless least-squares weights.
-            Residuals are multiplied by the square root of each weight.
+            Relative weights are normalized internally; multiplying all weights
+            by a common positive constant leaves the fit unchanged. Reported
+            objective_value is half the sum of original weighted squared decimal
+            residuals (not bp squared).
         initial_guesses: Optional NSS starts, with betas in decimal rates and
             taus in years. Defaults use several deterministic tau pairs and
             conditional linear estimates for the betas.
@@ -352,11 +411,14 @@ def calibrate_nss(
     Returns:
         Parameters, decimal fitted yields and residuals, decimal RMSE, weighted
         objective, and optimizer diagnostics. The lowest-cost finite result is
-        selected across all starts.
+        selected across converged starts, or across finite starts if none converge.
 
     Notes:
         SciPy performs the numerical optimization, but the NSS loadings and
-        residual function are implemented explicitly here. Parameter recovery
+        residual function and analytical Jacobian are implemented explicitly here.
+        Fixed optimizer scales are 0.05 decimal for betas and 2/5 years for taus;
+        these affect search steps, not parameter bounds or reported units.
+        Parameter recovery
         can be weak even with low curve RMSE because NSS decay terms may be
         poorly identified by a small maturity cross-section.
     """
@@ -393,30 +455,41 @@ def calibrate_nss(
 
     representation = _validate_fit_representation(input_representation)
     lower, upper = _validate_nss_bounds(bounds)
+    normalized_weights = fit_weights / fit_weights.max()
+    normalized_weights /= normalized_weights.mean()
     starts = _prepare_nss_starts(
-        maturities, yields, fit_weights, initial_guesses, lower, upper
+        maturities, yields, normalized_weights, initial_guesses, lower, upper
     )
-    sqrt_weights = np.sqrt(fit_weights)
+    sqrt_weights = np.sqrt(normalized_weights)
 
     def weighted_residuals(vector: np.ndarray) -> np.ndarray:
         params = NSSParameters(*map(float, vector))
-        return sqrt_weights * (nss_yields(maturities, params) - yields)
+        # Solve in bp so the gradient tolerance is meaningful for yield errors.
+        return sqrt_weights * (nss_yields(maturities, params) - yields) / 0.0001
+
+    def weighted_jacobian(vector: np.ndarray) -> np.ndarray:
+        return sqrt_weights[:, None] * nss_yield_jacobian(maturities, vector) / 0.0001
 
     candidates = []
+    failed_start_messages: list[str] = []
     for start_index, start in enumerate(starts):
         try:
             candidate = least_squares(
                 weighted_residuals,
                 start,
+                jac=weighted_jacobian,
                 bounds=(lower, upper),
                 method="trf",
-                x_scale="jac",
+                # Fixed economic scales avoid exploding steps in weakly
+                # identified tau directions when beta curvature terms vanish.
+                x_scale=np.array([0.05, 0.05, 0.05, 0.05, 2.0, 5.0]),
                 ftol=1e-12,
                 xtol=1e-12,
                 gtol=1e-12,
                 max_nfev=max_evaluations,
             )
-        except (FloatingPointError, ValueError):
+        except (FloatingPointError, ValueError) as exc:
+            failed_start_messages.append(f"start {start_index}: {exc}")
             continue
         if np.all(np.isfinite(candidate.x)) and math.isfinite(float(candidate.cost)):
             candidates.append((start_index, candidate))
@@ -432,8 +505,17 @@ def calibrate_nss(
     fitted = nss_yields(maturities, parameters)
     residuals = yields - fitted
     rmse = float(np.sqrt(np.mean(np.square(residuals))))
-    weighted_rmse = float(
-        np.sqrt(np.sum(fit_weights * np.square(residuals)) / np.sum(fit_weights))
+    weighted_rmse = float(np.sqrt(np.mean(normalized_weights * np.square(residuals))))
+    jacobian_norms = np.linalg.norm(best.jac, axis=0)
+    negligible_column = np.finfo(float).eps * float(jacobian_norms.max()) * 100.0
+    jacobian_condition = (
+        float(np.linalg.cond(best.jac / jacobian_norms))
+        if np.all(jacobian_norms > negligible_column)
+        else math.inf
+    )
+    names = ("beta0", "beta1", "beta2", "beta3", "tau1", "tau2")
+    at_bound = (best.x - lower <= (upper - lower) * 1e-6) | (
+        upper - best.x <= (upper - lower) * 1e-6
     )
     diagnostics = NSSCalibrationDiagnostics(
         success=bool(best.success),
@@ -445,6 +527,14 @@ def calibrate_nss(
         starts_attempted=len(starts),
         successful_starts=sum(bool(result.success) for _, result in candidates),
         best_start_index=best_index,
+        loading_condition_number=float(
+            np.linalg.cond(nss_loadings(maturities, parameters.tau1, parameters.tau2))
+        ),
+        jacobian_condition_number=jacobian_condition,
+        active_bounds=tuple(
+            name for name, active in zip(names, at_bound, strict=True) if active
+        ),
+        failed_start_messages=tuple(failed_start_messages),
     )
     return NSSCalibrationResult(
         parameters=parameters,
@@ -454,7 +544,7 @@ def calibrate_nss(
         residuals=residuals,
         rmse=rmse,
         weighted_rmse=weighted_rmse,
-        objective_value=float(best.cost),
+        objective_value=float(0.5 * np.sum(fit_weights * residuals**2)),
         diagnostics=diagnostics,
         input_representation=representation,
     )
@@ -472,15 +562,18 @@ def interpolate_zero_rates(
     The inputs must already be zero rates; observed CMT or par yields must not
     be passed without a separately documented conversion or bootstrap. With
     ``extrapolation='flat'``, the nearest endpoint zero rate is used outside
-    the node range. The default rejects extrapolation.
+    the node range. The default rejects extrapolation at positive times.
+    At time zero the first node rate is a reporting convention only: every
+    compounding convention gives D(0)=1, so no zero-time rate is inferred.
+    A single node is valid at that node or under explicit flat extrapolation.
     """
     nodes = _as_finite_1d(node_maturities_years, "node_maturities_years")
     rates = _as_finite_1d(node_zero_rates, "node_zero_rates")
     targets = _as_finite_1d(target_maturities_years, "target_maturities_years")
     if nodes.size != rates.size:
         raise ValueError("node maturities and zero rates must have equal length")
-    if nodes.size < 2:
-        raise ValueError("at least two zero-rate nodes are required")
+    if nodes.size < 1:
+        raise ValueError("at least one zero-rate node is required")
     if np.any(nodes <= 0.0) or np.any(np.diff(nodes) <= 0.0):
         raise ValueError("zero-rate node maturities must be positive and increasing")
     if np.any(targets < 0.0):
@@ -493,7 +586,7 @@ def interpolate_zero_rates(
         raise ValueError(
             f"unsupported extrapolation policy: {extrapolation!r}"
         ) from exc
-    outside = (targets < nodes[0]) | (targets > nodes[-1])
+    outside = (targets != 0.0) & ((targets < nodes[0]) | (targets > nodes[-1]))
     if policy is ExtrapolationPolicy.RAISE and np.any(outside):
         raise ValueError("target maturity lies outside the zero-rate node range")
     return np.interp(targets, nodes, rates)
@@ -710,7 +803,7 @@ def _prepare_nss_starts(
             )
             starts.append(np.r_[betas, tau1, tau2])
     validated_starts = []
-    interior_margin = np.maximum(1e-10, (upper - lower) * 1e-10)
+    interior_margin = (upper - lower) * 1e-8
     for start in starts:
         if start.size != 6 or not np.all(np.isfinite(start)):
             raise ValueError("every NSS initial guess must contain six finite values")

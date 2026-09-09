@@ -175,11 +175,18 @@ def plot_pca_loadings(
         axes = ax
         figure = axes.figure
 
-    diagnostics = interpret_pca_factors(result, max_components=n_components)
-    for component, diagnostic in enumerate(diagnostics):
+    diagnostics = (
+        interpret_pca_factors(result, max_components=n_components)
+        if len(result.maturities_years) >= 3
+        else None
+    )
+    for component in range(n_components):
         label = f"PC{component + 1}"
-        if diagnostic.suggested_label is not None:
-            label += f" ({diagnostic.suggested_label})"
+        if (
+            diagnostics is not None
+            and diagnostics[component].suggested_label is not None
+        ):
+            label += f" ({diagnostics[component].suggested_label})"
         axes.plot(
             result.maturities_years,
             result.loadings[:, component],

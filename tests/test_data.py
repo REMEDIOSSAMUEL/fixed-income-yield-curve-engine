@@ -149,3 +149,36 @@ def test_invalid_missing_policy_fails_clearly() -> None:
     with pytest.raises(ValueError, match="missing-value"):
         load_offline_treasury_yields(missing="fill")
     assert MissingValuePolicy.KEEP.value == "keep"
+
+
+def test_requested_date_window_applies_before_missing_row_policy() -> None:
+    """Missing tenors outside the requested dates cannot invalidate a clean window."""
+    csv = b"Date,DGS1\n2024-01-01,.\n2024-01-02,4.8\n2024-01-03,4.9\n"
+
+    def opener(request, **_kwargs):
+        assert "cosd=2024-01-02" in request.full_url
+        assert "coed=2024-01-03" in request.full_url
+        return BytesIO(csv)
+
+    result = fetch_fred_treasury_yields(
+        maturities=["1Y"],
+        missing="raise",
+        start_date="2024-01-02",
+        end_date="2024-01-03",
+        opener=opener,
+    )
+    assert result.yields["1Y"].tolist() == pytest.approx([0.048, 0.049])
+
+
+def test_missing_policy_retains_an_auditable_list_of_removed_dates(tmp_path) -> None:
+    """Dropped observations retain their dates in downstream metadata."""
+    path = tmp_path / "missing.csv"
+    path.write_text("Date,1Y\n2024-01-02,4.8\n2024-01-03,.\n2024-01-04,4.9\n")
+    result = load_treasury_yield_csv(path, maturities=["1Y"], missing="drop")
+    assert result.attrs["missing_dates"] == ["2024-01-03"]
+
+
+def test_empty_online_response_has_download_diagnostic() -> None:
+    """An empty provider response uses the offline-fallback exception path."""
+    with pytest.raises(TreasuryDataDownloadError, match="download failed"):
+        fetch_fred_treasury_yields(opener=lambda *_args, **_kwargs: BytesIO(b""))

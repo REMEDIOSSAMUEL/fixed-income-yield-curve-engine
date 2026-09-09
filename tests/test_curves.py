@@ -13,6 +13,7 @@ from fixed_income.curves import (
     interpolate_zero_rates,
     nelson_siegel_svensson,
     nss_loadings,
+    nss_yield_jacobian,
     nss_yields,
     validate_nss_parameters,
     zero_rates_to_discount_factors,
@@ -172,4 +173,123 @@ def test_curve_node_validation_rejects_invalid_input(
             values,
             CurveRepresentation.ZERO_RATE,
             compounding=CompoundingConvention.CONTINUOUS,
+        )
+
+
+def test_nss_loadings_match_independent_exponential_integrals() -> None:
+    """Quadrature is independent of the implementation's expm1/Taylor formulas."""
+    from scipy.integrate import quad
+
+    for maturity in (1e-7, 0.4, 3.0, 15.0, 100.0):
+        x1, x2 = maturity / 1.4, maturity / 6.0
+        slope = quad(lambda u, x=x1: np.exp(-x * u), 0.0, 1.0)[0]
+        first_curve = quad(lambda u, x=x1: np.exp(-x * u) - np.exp(-x), 0.0, 1.0)[0]
+        second_curve = quad(lambda u, x=x2: np.exp(-x * u) - np.exp(-x), 0.0, 1.0)[0]
+        np.testing.assert_allclose(
+            nss_loadings([maturity], 1.4, 6.0)[0],
+            [1.0, slope, first_curve, second_curve],
+            atol=2e-15,
+        )
+
+
+def test_nss_weights_rescaling_preserves_fit_and_rmse_units() -> None:
+    """Common weight scaling cannot change least-squares yields or decimal RMSE."""
+    observed = nss_yields(MATURITIES, KNOWN_PARAMETERS)
+    observed = observed + np.array([1, -1, 2, -2, 1, -1, 1, -1, 2, -2]) * 0.0001
+    weights = np.arange(1.0, 11.0)
+    first = calibrate_nss(MATURITIES, observed, weights=weights)
+    scaled = calibrate_nss(MATURITIES, observed, weights=weights * 1e-12)
+    np.testing.assert_allclose(first.fitted_yields, scaled.fitted_yields, atol=2e-10)
+    error_bp = (observed - first.fitted_yields) / 0.0001
+    assert first.rmse / 0.0001 == pytest.approx(np.linalg.norm(error_bp) / np.sqrt(10))
+    assert first.weighted_rmse / 0.0001 == pytest.approx(
+        np.sqrt(np.average(error_bp**2, weights=weights))
+    )
+    assert first.objective_value == pytest.approx(
+        0.5 * np.sum(weights * error_bp**2) * 0.0001**2
+    )
+    assert scaled.objective_value == pytest.approx(
+        first.objective_value * 1e-12, rel=1e-7, abs=0
+    )
+
+
+def test_nss_flat_curve_reports_weak_identification() -> None:
+    """A low-error constant curve does not identify the decay parameters."""
+    result = calibrate_nss(MATURITIES, np.full(10, 0.04))
+    assert result.rmse < 1e-10
+    assert result.diagnostics.jacobian_condition_number > 1e8
+
+
+def test_narrow_valid_nss_bounds_do_not_invert_start_interval() -> None:
+    """Clipping must stay inside valid bounds even when narrower than 1e-10."""
+    parameters = KNOWN_PARAMETERS.as_array()
+    result = calibrate_nss(
+        MATURITIES,
+        nss_yields(MATURITIES, KNOWN_PARAMETERS),
+        bounds=(parameters - 1e-12, parameters + 1e-12),
+    )
+    assert result.success
+    assert result.rmse < 1e-11
+
+
+@pytest.mark.parametrize(
+    "compounding, frequency", [("continuous", None), ("simple", None), ("periodic", 2)]
+)
+def test_discount_factor_round_trip(compounding: str, frequency: int | None) -> None:
+    """Invert discount factors algebraically to recover their decimal annual rates."""
+    times = np.array([0.25, 1.0, 5.0])
+    rates = np.array([-0.01, 0.0, 0.045])
+    factors = zero_rates_to_discount_factors(
+        times, rates, compounding=compounding, periodic_frequency=frequency
+    )
+    if compounding == "continuous":
+        recovered = -np.log(factors) / times
+    elif compounding == "simple":
+        recovered = (1 / factors - 1) / times
+    else:
+        recovered = 2 * np.expm1(-np.log(factors) / (2 * times))
+    np.testing.assert_allclose(recovered, rates, atol=1e-14)
+
+
+def test_single_zero_node_is_usable_without_implicit_extrapolation() -> None:
+    """A one-node curve supports that maturity; flat extension is a caller choice."""
+    curve = YieldCurve(
+        (1.0,),
+        (0.04,),
+        CurveRepresentation.ZERO_RATE,
+        compounding=CompoundingConvention.CONTINUOUS,
+    )
+    assert curve.discount_factors([1.0])[0] == pytest.approx(np.exp(-0.04))
+    assert curve.discount_factors([2.0], extrapolation="flat")[0] == pytest.approx(
+        np.exp(-0.08)
+    )
+    with pytest.raises(ValueError, match="outside"):
+        curve.discount_factors([2.0])
+
+
+@pytest.mark.parametrize(
+    "parameters",
+    [
+        KNOWN_PARAMETERS,
+        NSSParameters(0.04, -0.02, 0.03, -0.01, 0.04, 20.0),
+        NSSParameters(0.03, 0.04, 0.0, 0.0, 2.0, 2.0),
+    ],
+)
+def test_analytical_nss_jacobian_matches_central_differences(
+    parameters: NSSParameters,
+) -> None:
+    """Every beta and tau derivative agrees with independently perturbed yields."""
+    maturities = np.array([0.0, 1e-12, 0.03, 0.25, 1.0, 5.0, 10.0, 30.0])
+    vector = parameters.as_array()
+    jacobian = nss_yield_jacobian(maturities, parameters)
+    for column in range(6):
+        step = 1e-6 if column < 4 else vector[column] * 1e-5
+        up, down = vector.copy(), vector.copy()
+        up[column] += step
+        down[column] -= step
+        finite_difference = (
+            nss_yields(maturities, up) - nss_yields(maturities, down)
+        ) / (2 * step)
+        np.testing.assert_allclose(
+            jacobian[:, column], finite_difference, rtol=2e-7, atol=2e-11
         )

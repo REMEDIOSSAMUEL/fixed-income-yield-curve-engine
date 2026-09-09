@@ -2,8 +2,12 @@
 
 import matplotlib
 import numpy as np
+import pandas as pd
+import pytest
 
 matplotlib.use("Agg")
+
+import matplotlib.pyplot as plt
 
 from fixed_income.curves import NSSParameters, calibrate_nss, nss_yields
 from fixed_income.data import load_offline_treasury_yields
@@ -23,7 +27,7 @@ def test_plot_nss_curve_labels_observations_and_fit() -> None:
     assert axes.get_ylabel() == "Annual yield (%)"
     assert len(axes.collections) == 1
     assert len(axes.lines) == 1
-    figure.clear()
+    plt.close(figure)
 
 
 def test_plot_pca_loadings_uses_maturity_axis_and_dimensionless_loadings() -> None:
@@ -37,4 +41,22 @@ def test_plot_pca_loadings_uses_maturity_axis_and_dimensionless_loadings() -> No
     assert axes.get_ylabel() == "Loading (dimensionless)"
     assert len(axes.lines) == 4  # Three components plus the horizontal zero line.
     np.testing.assert_allclose(axes.lines[0].get_xdata(), result.maturities_years)
-    figure.clear()
+    plt.close(figure)
+
+
+@pytest.mark.parametrize("tenor_count", [1, 2])
+def test_plot_small_pca_universe_without_claiming_three_factor_shapes(
+    tenor_count: int,
+) -> None:
+    """One or two maturities can be plotted without a curvature interpretation."""
+    levels = pd.DataFrame(
+        {"1Y": [0.04, 0.041, 0.039, 0.043], "2Y": [0.05, 0.051, 0.054, 0.052]},
+        index=pd.bdate_range("2025-01-01", periods=4),
+    ).iloc[:, :tenor_count]
+    result = fit_yield_change_pca(levels)
+    figure, axes = plot_pca_loadings(result, n_components=tenor_count)
+    try:
+        assert axes.lines[0].get_label() == "PC1"
+        assert len(axes.lines) == tenor_count + 1
+    finally:
+        plt.close(figure)

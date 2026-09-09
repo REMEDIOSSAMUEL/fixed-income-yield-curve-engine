@@ -427,3 +427,10 @@ def test_day_count_rejects_segment_outside_reference_period() -> None:
             frequency=2,
             convention=DayCountConvention.ACTUAL_ACTUAL_TREASURY,
         )
+
+
+def test_price_underflow_is_rejected_instead_of_reported_as_zero() -> None:
+    """A positive distant cash flow cannot have an exactly zero mathematical price."""
+    bond = FixedRateBond(date(2025, 1, 15), date(3025, 1, 15), 0.0)
+    with pytest.raises(ArithmeticError, match="numeric range"):
+        dirty_price_from_ytm(bond, bond.accrual_start_date, 10.0)

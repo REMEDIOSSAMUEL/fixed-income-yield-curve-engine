@@ -197,3 +197,24 @@ def test_residual_panels_require_matching_tenors() -> None:
 
     with pytest.raises(ValueError, match="tenor labels must match"):
         calculate_curve_residuals(observed, fitted)
+
+
+@pytest.mark.parametrize("ddof, expected_std", [(0, np.sqrt(2 / 3)), (1, 1.0)])
+def test_rolling_ddof_and_window_endpoints(ddof: int, expected_std: float) -> None:
+    """Three historical values 1,2,3 bp have known variance and endpoints."""
+    dates = pd.bdate_range("2025-01-01", periods=4)
+    residuals = pd.Series([0.0001, 0.0002, 0.0003, 0.0004], index=dates)
+    result = rolling_z_scores(residuals, lookback=3, ddof=ddof)
+    assert result.historical_std_decimal.iloc[-1, 0] == pytest.approx(
+        expected_std * 0.0001
+    )
+    assert result.z_scores.iloc[-1, 0] == pytest.approx(2 / expected_std)
+    assert result.window_start_dates.iloc[-1, 0] == dates[0]
+    assert result.window_end_dates.iloc[-1, 0] == dates[2]
+
+
+def test_yield_butterfly_cancels_parallel_move() -> None:
+    """The raw fly is invariant under equal decimal yield shifts in all three legs."""
+    curve = {"2Y": 0.04, "5Y": 0.042, "10Y": 0.048}
+    shifted = {tenor: value + 0.005 for tenor, value in curve.items()}
+    assert butterfly_yield(shifted) == pytest.approx(butterfly_yield(curve), abs=1e-16)

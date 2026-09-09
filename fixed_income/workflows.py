@@ -41,6 +41,7 @@ from fixed_income.bonds import (
 from fixed_income.curves import (
     CompoundingConvention,
     CurveRepresentation,
+    ExtrapolationPolicy,
     NSSCalibrationResult,
     YieldCurve,
     calibrate_nss,
@@ -111,9 +112,12 @@ def load_market_state(*, offline: bool) -> MarketState:
     dataset = load_treasury_yields(
         offline=offline,
         fallback_to_offline=True,
-        missing=MissingValuePolicy.DROP,
+        missing=MissingValuePolicy.KEEP,
     )
-    latest = dataset.yields.iloc[-1].copy()
+    complete = dataset.yields.dropna(how="any")
+    if complete.empty:
+        raise ValueError("no complete CMT cross-section is available for curve fitting")
+    latest = complete.iloc[-1].copy()
     labels = tuple(str(column) for column in latest.index)
     maturities = np.asarray(
         [dataset.maturity_years[label] for label in labels], dtype=float
@@ -123,9 +127,13 @@ def load_market_state(*, offline: bool) -> MarketState:
         latest.to_numpy(dtype=float),
         input_representation=CurveRepresentation.TREASURY_CMT,
     )
+    if not fit.success:
+        raise RuntimeError(
+            f"latest NSS fit did not converge: {fit.diagnostics.message}"
+        )
     return MarketState(
         dataset=dataset,
-        valuation_date=dataset.yields.index[-1].date(),
+        valuation_date=latest.name.date(),
         maturity_labels=labels,
         maturities_years=maturities,
         observed_yields_decimal=latest,
@@ -242,7 +250,8 @@ def run_risk_workflow(
 
     Shock sizes are basis points and internally convert using 1 bp = 0.0001.
     Prices and P&L are currency amounts per 100 face for the demo bond; key-rate
-    DV01 is currency per bp.
+    DV01 is currency per bp. The illustrative proxy explicitly holds endpoint
+    zero rates flat outside its nodes, including coupons due before 3M.
     """
     market = load_market_state(offline=offline) if state is None else state
     zero_proxy = illustrative_zero_rate_proxy(market)
@@ -251,19 +260,27 @@ def run_risk_workflow(
     print("-----------------------------------------")
     print(
         "Assumption: latest CMT yields are copied into a continuously compounded\n"
-        "zero-rate proxy for this scenario only; this is not a bootstrapped curve."
+        "zero-rate proxy for this scenario only; this is not a bootstrapped curve.\n"
+        "Coupon times outside the nodes use flat endpoint zero-rate extrapolation."
     )
     risk = bond_risk_report(
         bond,
         market.valuation_date,
         zero_proxy,
-        include_shape_scenarios=False,
+        include_shape_scenarios=True,
+        extrapolation=ExtrapolationPolicy.FLAT,
     )
-    key_rates = key_rate_dv01_report(bond, market.valuation_date, zero_proxy)
+    key_rates = key_rate_dv01_report(
+        bond,
+        market.valuation_date,
+        zero_proxy,
+        extrapolation=ExtrapolationPolicy.FLAT,
+    )
     for report in (risk, key_rates):
         report.insert(0, "valuation_date", market.valuation_date.isoformat())
         report["curve_representation"] = zero_proxy.representation.value
         report["curve_compounding"] = zero_proxy.compounding.value
+        report["curve_extrapolation"] = ExtrapolationPolicy.FLAT.value
         report["curve_source_and_assumption"] = zero_proxy.source
     risk_path = _save_csv(risk, "bond_risk_report.csv")
     key_path = _save_csv(key_rates, "key_rate_dv01.csv")
@@ -274,11 +291,9 @@ def run_risk_workflow(
         "first_order_pnl_currency",
         "duration_convexity_pnl_currency",
     ]
-    print("\nParallel shocks: full revaluation versus approximations")
+    print("\nParallel and shaped shocks: full revaluation versus approximations")
     print(
-        risk.loc[:, risk_columns].to_string(
-            index=False, float_format="{:,.6f}".format
-        )
+        risk.loc[:, risk_columns].to_string(index=False, float_format="{:,.6f}".format)
     )
     key_columns = [
         "key_tenor",
@@ -296,9 +311,7 @@ def run_risk_workflow(
     return risk, key_rates
 
 
-def run_pca_workflow(
-    *, offline: bool, state: MarketState | None = None
-) -> PCAResult:
+def run_pca_workflow(*, offline: bool, state: MarketState | None = None) -> PCAResult:
     """Fit and plot covariance PCA of daily decimal CMT yield changes."""
     market = load_market_state(offline=offline) if state is None else state
     result = fit_yield_change_pca(market.dataset.yields)
@@ -442,6 +455,16 @@ def run_backtest_workflow(
     )
     yields = dataset.yields
     residuals = fit_historical_nss_residuals(yields, failure_policy="nan")
+    calibration_report = pd.DataFrame(residuals.attrs["calibration_diagnostics"])
+    _save_csv(calibration_report, "nss_calibration_diagnostics.csv")
+    failed_fits = int((~calibration_report["success"]).sum())
+    print(
+        f"Historical NSS fits: {len(calibration_report) - failed_fits} converged, "
+        f"{failed_fits} failed (failed signals close positions)."
+    )
+    print(f"Data source: {dataset.source}")
+    if dataset.fallback_reason:
+        print(f"Offline fallback reason: {dataset.fallback_reason}")
     five_year_residual = residuals["5Y"].rename("5Y NSS residual")
     unit_dv01 = calculate_par_proxy_unit_dv01(yields)
     config = BacktestConfig(
@@ -457,6 +480,20 @@ def run_backtest_workflow(
         unit_dv01,
         config=config,
     )
+    result.observations.attrs["provenance"] = {
+        "source": dataset.source,
+        "source_url": dataset.source_url,
+        "retrieved_at": dataset.retrieved_at.isoformat(),
+        "is_offline": dataset.is_offline,
+        "fallback_reason": dataset.fallback_reason,
+        "missing_value_policy": dataset.missing_value_policy.value,
+        "missing_dates_before_policy": list(yields.attrs.get("missing_dates", [])),
+        "failed_nss_dates": calibration_report.loc[
+            ~calibration_report["success"], "date"
+        ].tolist(),
+        "calibration": "independent deterministic bounded multistart each date",
+    }
+    _save_csv(result.metrics.reset_index(), "rv_backtest_metrics.csv")
     sensitivity = transaction_cost_sensitivity(
         yields,
         five_year_residual,
@@ -513,10 +550,7 @@ def _print_backtest_summary(
             f"net P&L {net['cumulative_pnl_currency_approx']:,.2f} | "
             f"{trade_count} trades"
         )
-        print(
-            "Saved: "
-            f"{_relative_path(paths[0])}, {_relative_path(paths[1])}"
-        )
+        print(f"Saved: {_relative_path(paths[0])}, {_relative_path(paths[1])}")
         return
 
     print("\nHistorical relative-value research backtest")
@@ -524,15 +558,12 @@ def _print_backtest_summary(
     print(f"Sample date range: {start} to {end}")
     print(f"Observations: {len(observations)}")
     print(f"Methodology summary: {result.methodology}")
+    print("Limitations: " + " ".join(result.limitations))
     print("Metrics use approximate currency P&L, not percentage returns.")
     print(
-        "Gross cumulative P&L: "
-        f"{gross['cumulative_pnl_currency_approx']:,.2f} currency"
+        f"Gross cumulative P&L: {gross['cumulative_pnl_currency_approx']:,.2f} currency"
     )
-    print(
-        "Net cumulative P&L: "
-        f"{net['cumulative_pnl_currency_approx']:,.2f} currency"
-    )
+    print(f"Net cumulative P&L: {net['cumulative_pnl_currency_approx']:,.2f} currency")
     print(
         "Annualised volatility (gross / net): "
         f"{gross['annualised_volatility_currency_approx']:,.2f} / "
@@ -548,10 +579,7 @@ def _print_backtest_summary(
         f"{gross['maximum_drawdown_currency']:,.2f} / "
         f"{net['maximum_drawdown_currency']:,.2f} currency"
     )
-    print(
-        "Turnover: "
-        f"{net['turnover_abs_notional_currency']:,.2f} currency face"
-    )
+    print(f"Turnover: {net['turnover_abs_notional_currency']:,.2f} currency face")
     print(
         "Hit rate on active intervals (gross / net): "
         f"{_format_optional_percentage(gross['hit_rate_active_intervals'])} / "
@@ -583,6 +611,8 @@ def _print_curve_summary(state: MarketState) -> None:
     print(f"Observation date: {state.valuation_date.isoformat()}")
     data_mode = "offline bundled sample" if state.dataset.is_offline else "online"
     print(f"Data mode: {data_mode}")
+    if state.dataset.fallback_reason:
+        print(f"Offline fallback reason: {state.dataset.fallback_reason}")
     print("Representation: Treasury constant-maturity yields (not zero rates)")
     observed = pd.DataFrame(
         {
@@ -605,6 +635,12 @@ def _print_curve_summary(state: MarketState) -> None:
     print("\nNelson-Siegel-Svensson parameters")
     print(parameter_table.to_string(index=False, float_format="{:.8f}".format))
     print(f"Fit RMSE: {state.nss_fit.rmse / BASIS_POINT_DECIMAL:.4f} bp")
+    diagnostics = state.nss_fit.diagnostics
+    print(
+        f"NSS loading condition number: {diagnostics.loading_condition_number:.3g}; "
+        f"scaled Jacobian condition: {diagnostics.jacobian_condition_number:.3g}; "
+        f"active bounds: {', '.join(diagnostics.active_bounds) or 'none'}"
+    )
 
 
 def _print_bond_summary(analytics: BondAnalytics) -> None:
@@ -631,25 +667,13 @@ def _print_bond_summary(analytics: BondAnalytics) -> None:
 
 
 def _butterfly_unit_dv01(state: MarketState) -> pd.Series:
-    values: dict[str, float] = {}
-    for tenor, years in (("2Y", 2), ("5Y", 5), ("10Y", 10)):
-        ytm = float(state.observed_yields_decimal[tenor])
-        bond = FixedRateBond(
-            accrual_start_date=state.valuation_date,
-            maturity_date=_add_years(state.valuation_date, years),
-            coupon_rate=ytm,
-            face_value=1.0,
-            frequency=2,
-        )
-        values[tenor] = dv01(bond, state.valuation_date, ytm)
-    return pd.Series(values, name="unit_dv01_currency_per_bp_per_notional")
-
-
-def _add_years(value: date, years: int) -> date:
-    try:
-        return value.replace(year=value.year + years)
-    except ValueError:
-        return value.replace(month=2, day=28, year=value.year + years)
+    panel = state.observed_yields_decimal.to_frame().T
+    panel.index = pd.DatetimeIndex([state.valuation_date])
+    return (
+        calculate_par_proxy_unit_dv01(panel)
+        .iloc[0]
+        .rename("unit_dv01_currency_per_bp_per_notional")
+    )
 
 
 def _save_csv(frame: pd.DataFrame, filename: str) -> Path:

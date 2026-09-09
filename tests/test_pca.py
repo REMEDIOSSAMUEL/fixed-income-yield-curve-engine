@@ -181,3 +181,45 @@ def test_correlation_mode_is_explicitly_standardized(
     assert result.method is PCAMethod.CORRELATION
     np.testing.assert_allclose(np.diag(result.decomposition_matrix), 1.0)
     assert not np.allclose(result.scales_decimal, 1.0)
+
+
+@pytest.mark.parametrize("method", ["covariance", "correlation"])
+def test_eigenvalues_scores_and_reconstruction_match_svd(
+    synthetic_yield_levels: pd.DataFrame,
+    method: str,
+) -> None:
+    """A direct SVD independently checks eigendecomposition and score dimensions."""
+    result = fit_yield_change_pca(synthetic_yield_levels, method=method)
+    changes = result.yield_changes_decimal.to_numpy()
+    centered = changes - changes.mean(axis=0)
+    analysis = (
+        centered if method == "covariance" else centered / centered.std(axis=0, ddof=1)
+    )
+    _, singular_values, _ = np.linalg.svd(analysis, full_matrices=False)
+    expected = singular_values**2 / (len(changes) - 1)
+    np.testing.assert_allclose(result.eigenvalues, expected, rtol=1e-11)
+    np.testing.assert_allclose(
+        result.explained_variance_ratios, expected / expected.sum(), rtol=1e-11
+    )
+    np.testing.assert_allclose(
+        np.var(result.factor_scores, axis=0, ddof=1), expected, rtol=1e-11
+    )
+    reconstructed = result.reconstruct(n_components=2)
+    error = (changes - reconstructed.to_numpy()) / result.scales_decimal
+    assert np.sum(error**2) == pytest.approx(
+        np.sum(singular_values[2:] ** 2), rel=1e-12
+    )
+
+
+def test_shape_labels_follow_vectors_when_components_are_permuted() -> None:
+    """A level loading is still level when it is PC3 instead of PC1."""
+    maturities = [1.0, 2.0, 3.0, 4.0, 5.0]
+    vectors = np.array(
+        [[-2, -2, 1], [-1, 1, 1], [0, 2, 1], [1, 1, 1], [2, -2, 1]], dtype=float
+    )
+    vectors /= np.linalg.norm(vectors, axis=0)
+    labels = [
+        diagnostic.suggested_label
+        for diagnostic in interpret_loading_shapes(maturities, vectors)
+    ]
+    assert labels == ["slope", "curvature", "level"]

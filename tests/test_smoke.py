@@ -52,7 +52,9 @@ def test_offline_backtest_cli_reports_metrics_and_writes_artifacts() -> None:
         check=False,
         capture_output=True,
         text=True,
-        timeout=120,
+        # Each day now uses a full multistart calibration; coverage also traces
+        # this subprocess. Keep a bounded runtime without relaxing math checks.
+        timeout=300,
         env={**os.environ, "MPLBACKEND": "Agg"},
     )
 
@@ -88,7 +90,7 @@ def test_offline_demo_runs_end_to_end() -> None:
         check=False,
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=300,
         env={**os.environ, "MPLBACKEND": "Agg"},
     )
 

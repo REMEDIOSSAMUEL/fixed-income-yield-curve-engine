@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import calendar
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime
 from enum import StrEnum
@@ -320,10 +321,15 @@ def dirty_price_from_ytm(
         bond, settlement_date
     )
     periodic_base = 1.0 + ytm / bond.frequency
-    return math.fsum(
+    price = math.fsum(
         cash_flow.total_amount * periodic_base ** (-period_count)
         for cash_flow, period_count in zip(cash_flows, period_counts, strict=True)
     )
+    if not math.isfinite(price) or price <= 0.0:
+        raise ArithmeticError(
+            "dirty price is outside the positive finite numeric range"
+        )
+    return price
 
 
 def clean_price_from_ytm(
@@ -413,7 +419,8 @@ def yield_to_maturity(
         RuntimeError: If a numerical bracket or converged root cannot be found.
 
     Notes:
-        The dirty-price equation is solved with ``scipy.optimize.brentq``.
+        The log dirty-price equation is solved with ``scipy.optimize.brentq``.
+        Log-sum-exp evaluation avoids overflowing trial prices during bracketing.
         Positive bullet-bond cash flows make price monotone for
         ``ytm > -frequency``. Negative yields are therefore supported whenever
         the periodic discount base remains positive.
@@ -437,14 +444,31 @@ def yield_to_maturity(
     target_dirty_price = market_price
     if normalized_price_type is PriceType.CLEAN:
         target_dirty_price += accrued_interest(bond, settlement_date)
+    if not math.isfinite(target_dirty_price):
+        raise ValueError("target dirty price must be finite currency")
+
+    cash_flows, period_counts = _future_cash_flows_and_period_counts(
+        bond, settlement_date
+    )
+    log_cash_flows = tuple(
+        (math.log(flow.total_amount), periods)
+        for flow, periods in zip(cash_flows, period_counts, strict=True)
+        if flow.total_amount > 0.0
+    )
 
     def price_residual(candidate_ytm: float) -> float:
-        return dirty_price_from_ytm(bond, settlement_date, candidate_ytm) - (
-            target_dirty_price
+        log_base = math.log1p(candidate_ytm / bond.frequency)
+        log_pvs = tuple(
+            amount - periods * log_base for amount, periods in log_cash_flows
         )
+        largest = max(log_pvs)
+        log_price = largest + math.log(
+            math.fsum(math.exp(value - largest) for value in log_pvs)
+        )
+        return log_price - math.log(target_dirty_price)
 
     if bracket is None:
-        lower, upper = _find_ytm_bracket(bond, settlement_date, target_dirty_price)
+        lower, upper = _find_ytm_bracket(bond, price_residual)
     else:
         lower, upper = _validate_ytm_bracket(bracket, bond.frequency)
         lower_residual = price_residual(lower)
@@ -452,7 +476,8 @@ def yield_to_maturity(
         if not _opposite_signs_or_zero(lower_residual, upper_residual):
             raise ValueError(
                 "supplied YTM bracket does not contain a price root: "
-                f"residuals are {lower_residual:.12g} and {upper_residual:.12g}"
+                f"log-price residuals are {lower_residual:.12g} "
+                f"and {upper_residual:.12g}"
             )
 
     try:
@@ -474,7 +499,7 @@ def yield_to_maturity(
         raise RuntimeError(
             f"YTM root finding did not converge after {result.iterations} iterations"
         )
-    residual = price_residual(root)
+    residual = dirty_price_from_ytm(bond, settlement_date, root) - target_dirty_price
     price_tolerance = max(1e-10, abs(target_dirty_price) * 1e-10)
     if not math.isfinite(residual) or abs(residual) > price_tolerance:
         raise RuntimeError(
@@ -661,16 +686,11 @@ def _future_cash_flows_and_period_counts(
 
 
 def _find_ytm_bracket(
-    bond: FixedRateBond, settlement_date: date, target_dirty_price: float
+    bond: FixedRateBond, residual: Callable[[float], float]
 ) -> tuple[float, float]:
     """Expand a bracket within the positive-discount-base yield domain."""
     lower = -0.5 * bond.frequency
     upper = max(0.10, bond.coupon_rate * 2.0)
-
-    def residual(candidate_ytm: float) -> float:
-        return dirty_price_from_ytm(bond, settlement_date, candidate_ytm) - (
-            target_dirty_price
-        )
 
     lower_residual = residual(lower)
     for _ in range(16):
@@ -678,6 +698,10 @@ def _find_ytm_bracket(
             break
         distance_to_boundary = lower + bond.frequency
         lower = -bond.frequency + distance_to_boundary / 10.0
+        if lower <= -bond.frequency:
+            raise RuntimeError(
+                "YTM root is too close to the floating-point domain boundary"
+            )
         lower_residual = residual(lower)
     else:
         raise RuntimeError(

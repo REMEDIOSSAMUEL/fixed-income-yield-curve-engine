@@ -1,6 +1,7 @@
 """Offline tests for the lagged historical relative-value backtest."""
 
 import math
+from dataclasses import replace
 
 import numpy as np
 import pandas as pd
@@ -11,6 +12,7 @@ from fixed_income.backtest import (
     calculate_drawdown,
     calculate_par_proxy_unit_dv01,
     calculate_performance_metrics,
+    fit_historical_nss_residuals,
     generate_threshold_positions,
     run_relative_value_backtest,
     transaction_cost_sensitivity,
@@ -126,8 +128,7 @@ def test_signal_direction_and_position_signs(
     ).observations
     row = rows.iloc[2]
     notionals = [
-        row[f"target_notional_{label}_currency"]
-        for label in ("2y", "5y", "10y")
+        row[f"target_notional_{label}_currency"] for label in ("2y", "5y", "10y")
     ]
     sides = tuple("long" if value > 0 else "short" for value in notionals)
 
@@ -156,9 +157,7 @@ def test_first_order_pnl_sign_for_long_and_short_belly() -> None:
     cheap = run_relative_value_backtest(
         cheap_yields, cheap_residual, unit_dv01, config=_config()
     )
-    rich_yields, rich_residual, rich_dv01 = _inputs(
-        [0.0, -0.0001, -0.0003, -0.0004]
-    )
+    rich_yields, rich_residual, rich_dv01 = _inputs([0.0, -0.0001, -0.0003, -0.0004])
     rich_yields.iloc[3, 1] += 0.0001
     rich = run_relative_value_backtest(
         rich_yields, rich_residual, rich_dv01, config=_config()
@@ -200,9 +199,9 @@ def test_sharpe_uses_sqrt_annualisation_and_sample_volatility() -> None:
     expected = pnl.mean() / pnl.std(ddof=1) * math.sqrt(252)
 
     assert metrics.loc["sharpe_ratio_on_approx_pnl", "gross"] == pytest.approx(expected)
-    assert metrics.loc[
-        "annualised_mean_pnl_currency_approx", "gross"
-    ] == pytest.approx(2.0 * 252)
+    assert metrics.loc["annualised_mean_pnl_currency_approx", "gross"] == pytest.approx(
+        2.0 * 252
+    )
 
 
 def test_empty_position_period_has_zero_pnl_cost_and_time_in_market() -> None:
@@ -268,3 +267,142 @@ def test_proxy_dv01_handles_february_schedule_boundaries() -> None:
     assert result.shape == (2, 3)
     assert (result > 0.0).all().all()
     assert not np.allclose(result.iloc[0], result.iloc[1])
+
+
+@pytest.mark.parametrize("direction", [1, -1])
+def test_exit_crossing_does_not_require_landing_inside_band(direction: int) -> None:
+    """Crossing the mean closes a converged position even if it skips the exit band."""
+    signals = pd.Series(
+        np.array([2.0, 1.0, -0.8, -2.0]) * direction,
+        index=pd.bdate_range("2025-01-01", periods=4),
+    )
+    actual = generate_threshold_positions(signals, entry_z=2.0, exit_z=0.5)
+    assert actual.tolist() == [direction, direction, 0, -direction]
+
+
+def test_exact_reversal_rebalance_and_terminal_cash_ledger() -> None:
+    """Hand ledger: 2.25m entry, 4.5m reversal, 0.5m hedge trade, 1.75m close."""
+    yields, residual, unit = _inputs([0.0, 0.0001, 0.0003, -0.0004, -0.001, -0.002])
+    yields["5Y"] = [0.04, 0.04, 0.04, 0.0399, 0.04, 0.0402]
+    unit.loc[unit.index[4] :, "2Y"] = 0.0004
+    rows = run_relative_value_backtest(
+        yields,
+        residual,
+        unit,
+        config=replace(_config(cost=1.0), liquidate_at_end=True),
+    ).observations
+    np.testing.assert_allclose(
+        rows["turnover_abs_notional_currency"],
+        [0, 0, 2_250_000, 4_500_000, 500_000, 1_750_000],
+    )
+    np.testing.assert_allclose(
+        rows["transaction_cost_currency"], [0, 0, 225, 450, 50, 175]
+    )
+    np.testing.assert_allclose(
+        rows["gross_pnl_currency_approx"], [0, 0, 0, 400, 400, 800], atol=1e-8
+    )
+    np.testing.assert_allclose(
+        rows["net_pnl_currency_approx"], [0, 0, -225, -50, 350, 625], atol=1e-8
+    )
+    assert rows.iloc[-1]["held_direction_from_prior_date"] == -1
+    assert rows.iloc[-1]["decision_direction"] == 0
+
+
+def test_missing_signal_closes_after_held_interval_is_earned() -> None:
+    """An unavailable current signal cannot erase P&L of yesterday's position."""
+    yields, residual, unit = _inputs([0, 0.0001, 0.0003, np.nan, 0])
+    yields.iloc[3, 1] -= 0.0001
+    rows = run_relative_value_backtest(
+        yields, residual, unit, config=_config(cost=1.0)
+    ).observations
+    assert rows.iloc[3]["gross_pnl_currency_approx"] == pytest.approx(400)
+    assert rows.iloc[3]["transaction_cost_currency"] == pytest.approx(225)
+    assert rows.iloc[3]["decision_direction"] == 0
+    assert rows.iloc[4]["gross_pnl_currency_approx"] == 0
+
+
+def test_current_risk_estimate_cannot_reprice_prior_interval() -> None:
+    """P&L uses prior-date DV01 even when today's estimate changes radically."""
+    yields, residual, unit = _inputs([0, 0.0001, 0.0003, 0.0004])
+    yields.iloc[-1, 1] -= 0.0001
+    unit.iloc[-1] *= 10
+    rows = run_relative_value_backtest(
+        yields, residual, unit, config=_config()
+    ).observations
+    assert rows.iloc[-1]["gross_pnl_currency_approx"] == pytest.approx(400)
+
+
+def test_historical_calibration_is_prefix_and_column_order_invariant() -> None:
+    """NSS refits cannot use future rows, and residuals retain input tenor alignment."""
+    from fixed_income.data import load_offline_treasury_yields
+
+    panel = load_offline_treasury_yields().yields.iloc[:3]
+    baseline = fit_historical_nss_residuals(panel)
+    changed = panel.copy()
+    changed.iloc[-1] = changed.iloc[-1].to_numpy()[::-1]
+    altered = fit_historical_nss_residuals(changed)
+    shuffled = fit_historical_nss_residuals(panel.iloc[:, ::-1])
+    np.testing.assert_array_equal(baseline.iloc[:-1], altered.iloc[:-1])
+    np.testing.assert_allclose(baseline, shuffled.loc[:, panel.columns], atol=1e-12)
+    assert all(
+        row["starts_attempted"] > 1 for row in baseline.attrs["calibration_diagnostics"]
+    )
+
+
+def test_historical_fit_failure_is_visible_and_does_not_abort_other_dates(
+    monkeypatch,
+) -> None:
+    """A simulated numerical failure leaves a missing row and dated explanation."""
+    import fixed_income.backtest as backtest
+    from fixed_income.data import load_offline_treasury_yields
+
+    panel = load_offline_treasury_yields().yields.iloc[:3]
+    calibrator = backtest.calibrate_nss
+    calls = 0
+
+    def sometimes_fails(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("synthetic convergence failure")
+        return calibrator(*args, **kwargs)
+
+    monkeypatch.setattr(backtest, "calibrate_nss", sometimes_fails)
+    result = fit_historical_nss_residuals(panel, failure_policy="nan")
+    assert result.iloc[1].isna().all()
+    assert result.iloc[[0, 2]].notna().all().all()
+    diagnostics = result.attrs["calibration_diagnostics"]
+    assert not diagnostics[1]["success"]
+    assert "synthetic convergence failure" in diagnostics[1]["message"]
+
+
+@pytest.mark.parametrize("settlement", ["2025-02-28", "2028-02-29", "2029-02-28"])
+def test_proxy_schedule_across_leap_year_origins(settlement: str) -> None:
+    """Both positive and negative yields remain supported around February rolls."""
+    panel = pd.DataFrame(
+        {"2Y": [-0.01], "5Y": [0.04], "10Y": [0.0]},
+        index=pd.DatetimeIndex([settlement]),
+    )
+    assert (calculate_par_proxy_unit_dv01(panel) > 0).all().all()
+
+
+def test_missing_yields_are_rejected_instead_of_assigned_zero_pnl() -> None:
+    """The caller must select a data policy before the accounting engine runs."""
+    yields, residual, unit = _inputs([0, 0.0001, 0.0003, 0.0004])
+    yields.iloc[-1, 1] = np.nan
+    with pytest.raises(ValueError, match="missing"):
+        run_relative_value_backtest(yields, residual, unit, config=_config())
+
+
+def test_metrics_do_not_trust_stale_drawdowns_or_skip_missing_pnl() -> None:
+    """Recompute currency drawdown from the ledger and reject an incomplete ledger."""
+    yields, residual, unit = _inputs([0, 0.0001, 0.0003, 0.0004])
+    rows = run_relative_value_backtest(
+        yields, residual, unit, config=_config(cost=1.0)
+    ).observations
+    rows["net_drawdown_currency"] = 0.0
+    metrics = calculate_performance_metrics(rows)
+    assert metrics.loc["maximum_drawdown_currency", "net"] == pytest.approx(225)
+    rows.loc[rows.index[-1], "net_pnl_currency_approx"] = np.nan
+    with pytest.raises(ValueError, match="missing"):
+        calculate_performance_metrics(rows)

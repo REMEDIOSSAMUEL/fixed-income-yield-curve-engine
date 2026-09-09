@@ -60,7 +60,7 @@ FRED_SERIES_BY_MATURITY: dict[str, str] = {
 
 FRED_SOURCE_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv"
 OFFLINE_SAMPLE_PATH = (
-    Path(__file__).resolve().parents[1] / "data" / "sample_treasury_yields.csv"
+    Path(__file__).resolve().parent / "sample_data" / "sample_treasury_yields.csv"
 )
 
 
@@ -179,6 +179,10 @@ def validate_treasury_yield_panel(
         raise TreasuryDataError("Treasury yield panel contains invalid dates")
     if panel.index.has_duplicates:
         raise TreasuryDataError("Treasury yield panel contains duplicated dates")
+    if panel.index.tz is not None or not panel.index.equals(panel.index.normalize()):
+        raise TreasuryDataError(
+            "daily Treasury dates must be timezone-naive midnight dates"
+        )
     if not panel.index.is_monotonic_increasing:
         raise TreasuryDataError("Treasury yield panel dates must be increasing")
     if panel.columns.has_duplicates:
@@ -315,6 +319,10 @@ def fetch_fred_treasury_yields(
     if requested_start and requested_end and requested_start > requested_end:
         raise ValueError("start_date must not be after end_date")
     params = {"id": ",".join(FRED_SERIES_BY_MATURITY[label] for label in labels)}
+    if requested_start:
+        params["cosd"] = requested_start.isoformat()
+    if requested_end:
+        params["coed"] = requested_end.isoformat()
     request = Request(
         f"{FRED_SOURCE_URL}?{urlencode(params, safe=',')}",
         headers={"User-Agent": "fixed-income-yield-curve-engine/0.1"},
@@ -324,7 +332,14 @@ def fetch_fred_treasury_yields(
         with response:  # type: ignore[attr-defined]
             payload = response.read()  # type: ignore[attr-defined]
         frame = pd.read_csv(BytesIO(payload), na_values=[".", "NA", "N/A"])
-    except (HTTPError, URLError, TimeoutError, OSError, pd.errors.ParserError) as exc:
+    except (
+        HTTPError,
+        URLError,
+        TimeoutError,
+        OSError,
+        pd.errors.ParserError,
+        pd.errors.EmptyDataError,
+    ) as exc:
         raise TreasuryDataDownloadError(
             f"official FRED Treasury yield download failed: {exc}"
         ) from exc
@@ -333,6 +348,8 @@ def fetch_fred_treasury_yields(
         maturities=labels,
         raw_units="percent",
         missing=policy,
+        start_date=requested_start,
+        end_date=requested_end,
     )
     panel = _filter_dates(panel, requested_start, requested_end)
     return _build_dataset(
@@ -411,6 +428,8 @@ def _normalise_raw_frame(
     maturities: Sequence[str] | None,
     raw_units: str,
     missing: MissingValuePolicy | str,
+    start_date: date | None = None,
+    end_date: date | None = None,
 ) -> pd.DataFrame:
     labels = _normalise_maturities(maturities)
     policy = _normalise_missing_policy(missing)
@@ -445,10 +464,23 @@ def _normalise_raw_frame(
     if raw_units == "percent":
         panel = percentages_to_decimals(panel)
     elif raw_units == "decimal":
-        panel = panel.apply(pd.to_numeric, errors="coerce")
+        numeric = panel.apply(pd.to_numeric, errors="coerce")
+        if bool((numeric.isna() & ~panel.isna()).to_numpy().any()):
+            raise TreasuryDataError(
+                "yield values contain malformed non-numeric entries"
+            )
+        panel = numeric
     else:
         raise ValueError("raw_units must be explicitly 'percent' or 'decimal'")
     panel.index = pd.DatetimeIndex(parsed_dates, name="date")
+    # Validate dates, units and malformed cells before a missing policy can drop
+    # rows and conceal a schema error.
+    panel = validate_treasury_yield_panel(panel, allow_missing=True)
+    panel = _filter_dates(panel, start_date, end_date)
+    panel.attrs["missing_dates"] = [
+        timestamp.date().isoformat()
+        for timestamp in panel.index[panel.isna().any(axis=1)]
+    ]
     panel = _apply_missing_policy(panel, policy)
     return validate_treasury_yield_panel(
         panel, allow_missing=policy is MissingValuePolicy.KEEP

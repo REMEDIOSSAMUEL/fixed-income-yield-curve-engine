@@ -25,9 +25,10 @@ face notional and does not purport to reproduce institutional execution.
 
 from __future__ import annotations
 
+import json
 import math
 from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import date
 from pathlib import Path
 
@@ -37,7 +38,7 @@ import pandas as pd
 from matplotlib.figure import Figure
 
 from fixed_income.bonds import FixedRateBond, dv01
-from fixed_income.curves import CurveRepresentation, calibrate_nss, nss_yields
+from fixed_income.curves import CurveRepresentation, calibrate_nss
 from fixed_income.pca import maturity_in_years
 from fixed_income.relative_value import BASIS_POINT_DECIMAL, rolling_z_score
 
@@ -60,7 +61,9 @@ class BacktestConfig:
         entry_z: Positive dimensionless absolute entry threshold. Equality
             enters: ``z >= entry_z`` is cheap and ``z <= -entry_z`` is rich.
         exit_z: Non-negative dimensionless exit threshold strictly below
-            ``entry_z``. A position exits when ``abs(z) <= exit_z``.
+            ``entry_z``. Long positions exit at ``z <= exit_z`` and shorts at
+            ``z >= -exit_z``, including jumps across the exit band. An opposite
+            entry threshold reverses the position directly.
         belly_notional_currency: Absolute 5Y face-notional normalisation.
         transaction_cost_bps_per_face: Non-negative one-way cost in basis
             points of absolute face notional traded. One bp of face is
@@ -85,9 +88,7 @@ class BacktestConfig:
         """Validate all fields without changing their documented units."""
         _positive_integer(self.lookback, "lookback")
         minimum = (
-            self.lookback
-            if self.min_observations is None
-            else self.min_observations
+            self.lookback if self.min_observations is None else self.min_observations
         )
         _positive_integer(minimum, "min_observations")
         if minimum > self.lookback:
@@ -102,14 +103,18 @@ class BacktestConfig:
             raise ValueError("entry_z must be strictly positive")
         if exit_value < 0.0 or exit_value >= entry:
             raise ValueError("exit_z must be non-negative and strictly below entry_z")
-        if _finite_number(
-            self.belly_notional_currency, "belly_notional_currency"
-        ) <= 0.0:
+        if (
+            _finite_number(self.belly_notional_currency, "belly_notional_currency")
+            <= 0.0
+        ):
             raise ValueError("belly_notional_currency must be strictly positive")
-        if _finite_number(
-            self.transaction_cost_bps_per_face,
-            "transaction_cost_bps_per_face",
-        ) < 0.0:
+        if (
+            _finite_number(
+                self.transaction_cost_bps_per_face,
+                "transaction_cost_bps_per_face",
+            )
+            < 0.0
+        ):
             raise ValueError("transaction_cost_bps_per_face must be non-negative")
         _positive_integer(self.annualisation_factor, "annualisation_factor")
         if not isinstance(self.liquidate_at_end, bool):
@@ -143,8 +148,9 @@ def generate_threshold_positions(
     """Generate stateful target directions from dimensionless z-scores.
 
     Returns ``+1`` for a long 5Y belly/short wings trade, ``-1`` for a short
-    belly/long wings trade, and zero when flat. Positive 5Y NSS residual z is
-    cheap (high yield) and therefore maps to ``+1``. Equality at entry and exit
+    belly/long wings trade, and zero when flat. Positive 5Y NSS residual z means
+    above its trailing mean and maps to ``+1``; the raw residual can still be
+    negative (rich to the current cross-sectional fit). Equality at entry and exit
     thresholds triggers the action. Missing signals close an existing target
     because no observation is backfilled. A jump through the opposite entry
     threshold reverses the target directly.
@@ -167,12 +173,14 @@ def generate_threshold_positions(
                 current = 1
             elif value <= -entry:
                 current = -1
-        elif abs(value) <= exit_value:
-            current = 0
         elif current == 1 and value <= -entry:
             current = -1
         elif current == -1 and value >= entry:
             current = 1
+        elif (current == 1 and value <= exit_value) or (
+            current == -1 and value >= -exit_value
+        ):
+            current = 0
         positions.append(current)
     return pd.Series(
         positions, index=signal.index, name="decision_direction", dtype=int
@@ -187,40 +195,66 @@ def fit_historical_nss_residuals(
     """Fit each dated cross-section and return NSS residuals in decimal yield.
 
     Each row is calibrated using only information available on or before that
-    date; no later date enters the fit. The first date uses the calibrator's
-    deterministic starts and each later date uses the preceding successful
-    parameters as its sole warm start. Inputs remain Treasury CMT or other
-    stated yield observations rather than becoming zero rates.
+    date; no later date enters the fit. Every date uses the same deterministic
+    multistart search, avoiding dependence on a prior local optimum. Input
+    Treasury CMT observations retain their representation.
     ``failure_policy`` is ``'raise'`` or ``'nan'``; the latter leaves the
-    entire failed row missing.
+    entire failed row missing. ``result.attrs['calibration_diagnostics']`` holds
+    dated parameters, decimal/bp RMSE, conditioning, active bounds and failures.
     """
     panel = _validate_yield_panel(observed_yields_decimal, require_fly=False)
     if failure_policy not in {"raise", "nan"}:
         raise ValueError("failure_policy must be 'raise' or 'nan'")
     maturities = np.asarray([maturity_in_years(label) for label in panel.columns])
+    if len(maturities) < 6:
+        raise ValueError("historical NSS requires at least six distinct maturities")
+    order = np.argsort(maturities)
+    inverse_order = np.argsort(order)
     residual_rows: list[np.ndarray] = []
-    previous_parameters = None
+    diagnostic_rows: list[dict[str, object]] = []
     for timestamp, row in panel.iterrows():
         try:
             fit = calibrate_nss(
                 maturities,
                 row.to_numpy(dtype=float),
-                initial_guesses=(
-                    None if previous_parameters is None else [previous_parameters]
-                ),
                 input_representation=CurveRepresentation.TREASURY_CMT,
             )
             if not fit.diagnostics.success:
                 raise ArithmeticError(f"NSS fit did not converge on {timestamp.date()}")
-            previous_parameters = fit.parameters
-            residual_rows.append(
-                row.to_numpy(dtype=float) - nss_yields(maturities, fit.parameters)
+            residual_rows.append(fit.residuals[inverse_order])
+            diagnostic_rows.append(
+                {
+                    "date": timestamp.date().isoformat(),
+                    "success": True,
+                    "rmse_decimal": fit.rmse,
+                    "rmse_bp": fit.rmse / BASIS_POINT_DECIMAL,
+                    **asdict(fit.parameters),
+                    "loading_condition_number": (
+                        fit.diagnostics.loading_condition_number
+                    ),
+                    "jacobian_condition_number": (
+                        fit.diagnostics.jacobian_condition_number
+                    ),
+                    "active_bounds": ",".join(fit.diagnostics.active_bounds),
+                    "starts_attempted": fit.diagnostics.starts_attempted,
+                    "successful_starts": fit.diagnostics.successful_starts,
+                    "message": fit.diagnostics.message,
+                }
             )
-        except (ArithmeticError, RuntimeError, ValueError):
+        except (ArithmeticError, RuntimeError, ValueError) as exc:
             if failure_policy == "raise":
                 raise
             residual_rows.append(np.full(len(panel.columns), np.nan))
-    return pd.DataFrame(residual_rows, index=panel.index, columns=panel.columns)
+            diagnostic_rows.append(
+                {
+                    "date": timestamp.date().isoformat(),
+                    "success": False,
+                    "message": str(exc),
+                }
+            )
+    result = pd.DataFrame(residual_rows, index=panel.index, columns=panel.columns)
+    result.attrs["calibration_diagnostics"] = diagnostic_rows
+    return result
 
 
 def calculate_par_proxy_unit_dv01(
@@ -232,9 +266,10 @@ def calculate_par_proxy_unit_dv01(
     semiannual bullet with coupon equal to its decimal CMT yield when
     non-negative (and zero for a negative yield), one currency unit of face,
     settlement on the observation date, and maturity at the stated year tenor.
-    The contract starts one year before the
-    observation so February month-end changes remain inside a valid regular,
-    no-stub schedule; only future cash flows enter DV01. It is a transparent
+    The contract starts at the calendar month end one year before maturity's
+    backward tenor offset so leap-year February remains on a regular schedule.
+    Only future cash flows enter DV01. If the observation is not on that roll,
+    the proxy has fractional accrual and need not be exactly par. It is a transparent
     duration proxy, not an assertion that the CMT series identifies a specific
     tradable bond. DV01 is conventional YTM-based dirty-price sensitivity.
     """
@@ -247,8 +282,13 @@ def calculate_par_proxy_unit_dv01(
             years = int(maturity_in_years(label))
             ytm = float(row[label])
             maturity = _add_years(settlement, years)
+            accrual_start = _add_years(maturity, -(years + 1))
+            if maturity == (pd.Timestamp(maturity) + pd.offsets.MonthEnd(0)).date():
+                accrual_start = (
+                    pd.Timestamp(accrual_start) + pd.offsets.MonthEnd(0)
+                ).date()
             proxy = FixedRateBond(
-                accrual_start_date=_add_years(maturity, -(years + 1)),
+                accrual_start_date=accrual_start,
                 maturity_date=maturity,
                 coupon_rate=max(ytm, 0.0),
                 face_value=1.0,
@@ -284,9 +324,7 @@ def run_relative_value_backtest(
     settings = BacktestConfig() if config is None else config
     if not isinstance(settings, BacktestConfig):
         raise TypeError("config must be a BacktestConfig")
-    panel = _select_fly_columns(
-        _validate_yield_panel(yields_decimal, require_fly=True)
-    )
+    panel = _select_fly_columns(_validate_yield_panel(yields_decimal, require_fly=True))
     residual = _validate_dated_series(
         five_year_nss_residual_decimal,
         "five_year_nss_residual_decimal",
@@ -318,20 +356,22 @@ def run_relative_value_backtest(
     target_notionals = _target_notionals(
         decisions, unit_dv01, settings.belly_notional_currency
     )
+    if not np.isfinite(target_notionals.to_numpy()).all():
+        raise ArithmeticError("hedge sizing produced non-finite face notionals")
     prior_targets = target_notionals.shift(1).fillna(0.0)
     prior_unit_dv01 = unit_dv01.shift(1)
     yield_changes_bp = panel.diff() / BASIS_POINT_DECIMAL
     signed_held_dv01 = prior_targets * prior_unit_dv01
     leg_pnl = -(signed_held_dv01 * yield_changes_bp)
-    leg_pnl = leg_pnl.fillna(0.0)
+    leg_pnl.iloc[0] = 0.0  # Only the initial row has no prior holding interval.
+    if not np.isfinite(leg_pnl.to_numpy()).all():
+        raise ArithmeticError("held DV01 or yield-change P&L is non-finite")
     gross_pnl = leg_pnl.sum(axis=1)
 
     trades = target_notionals - prior_targets
     turnover = trades.abs().sum(axis=1)
     transaction_cost = (
-        turnover
-        * settings.transaction_cost_bps_per_face
-        * BASIS_POINT_DECIMAL
+        turnover * settings.transaction_cost_bps_per_face * BASIS_POINT_DECIMAL
     )
     net_pnl = gross_pnl - transaction_cost
     gross_cumulative = gross_pnl.cumsum()
@@ -341,6 +381,7 @@ def run_relative_value_backtest(
     observations = pd.DataFrame(index=panel.index)
     observations.index.name = "date"
     observations["residual_5y_decimal"] = residual
+    observations["elapsed_calendar_days"] = panel.index.to_series().diff().dt.days
     observations["historical_mean_decimal"] = rolling["historical_mean_decimal"]
     observations["historical_std_decimal"] = rolling["historical_std_decimal"]
     observations["z_score"] = rolling["z_score"]
@@ -351,9 +392,7 @@ def run_relative_value_backtest(
         key = label.lower()
         observations[f"yield_{key}_decimal"] = panel[label]
         observations[f"yield_change_{key}_bp"] = yield_changes_bp[label]
-        observations[f"unit_dv01_{key}_currency_per_bp_per_notional"] = unit_dv01[
-            label
-        ]
+        observations[f"unit_dv01_{key}_currency_per_bp_per_notional"] = unit_dv01[label]
         observations[f"target_notional_{key}_currency"] = target_notionals[label]
         observations[f"held_notional_{key}_currency"] = prior_targets[label]
         observations[f"held_dv01_{key}_currency_per_bp"] = signed_held_dv01[label]
@@ -373,6 +412,8 @@ def run_relative_value_backtest(
     observations["cumulative_net_pnl_currency_approx"] = net_cumulative
     observations["gross_drawdown_currency"] = calculate_drawdown(gross_cumulative)
     observations["net_drawdown_currency"] = calculate_drawdown(net_cumulative)
+    if not np.isfinite(net_pnl.to_numpy()).all():
+        raise ArithmeticError("transaction costs or net P&L are non-finite")
 
     metrics = calculate_performance_metrics(
         observations, annualisation_factor=settings.annualisation_factor
@@ -384,10 +425,21 @@ def run_relative_value_backtest(
         methodology=(
             "5Y observed-minus-NSS-fitted residual z-score; history through t-1; "
             "decision at t held over t to t+1; DV01-neutral long-belly target for "
-            "positive/cheap signals; first-order yield-change P&L"
+            "above-trailing-mean signals; directional exits include band crossings; "
+            "daily hedge rebalancing; costs booked on decision date; "
+            "first-order yield-change P&L at prior-date DV01"
         ),
         limitations=(
             "Treasury constant-maturity yields are not directly tradable securities.",
+            "Observation-date execution is hypothetical: publication timestamps and "
+            "an executable subsequent price are unavailable; "
+            "no trading lag is inferred.",
+            "Data are a later historical snapshot, not a point-in-time vintage; "
+            "revisions and selected complete-case dates can affect results.",
+            "Annualisation assumes daily observations, includes signal warm-up zeros, "
+            "and does not adjust for serial correlation or irregular calendar gaps.",
+            "A positive residual z-score means above its historical mean, not "
+            "necessarily a positive observed-minus-fitted raw residual.",
             "Execution costs are a simple bp-of-face approximation, not "
             "historical bid/ask or market impact.",
             "Carry, roll, convexity, financing, funding, futures basis, taxes, "
@@ -434,8 +486,6 @@ def calculate_performance_metrics(
     required = {
         "gross_pnl_currency_approx",
         "net_pnl_currency_approx",
-        "gross_drawdown_currency",
-        "net_drawdown_currency",
         "held_direction_from_prior_date",
         "decision_direction",
         "turnover_abs_notional_currency",
@@ -444,6 +494,28 @@ def calculate_performance_metrics(
     missing = required.difference(observations.columns)
     if missing:
         raise ValueError(f"observations are missing metric columns: {sorted(missing)}")
+    _validate_index(observations.index, "performance")
+    numeric = _numeric_frame(observations.loc[:, sorted(required)], "observations")
+    if numeric.isna().any().any():
+        raise ValueError("performance observations must not contain missing values")
+    if (
+        (numeric[["transaction_cost_currency", "turnover_abs_notional_currency"]] < 0)
+        .any()
+        .any()
+    ):
+        raise ValueError("transaction costs and turnover must be non-negative currency")
+    for column in ("decision_direction", "held_direction_from_prior_date"):
+        if not numeric[column].isin([-1, 0, 1]).all():
+            raise ValueError("directions must be -1, 0, or 1")
+    observations = numeric
+    if not np.allclose(
+        observations["net_pnl_currency_approx"],
+        observations["gross_pnl_currency_approx"]
+        - observations["transaction_cost_currency"],
+        rtol=1e-12,
+        atol=1e-10,
+    ):
+        raise ValueError("net P&L must equal gross P&L minus transaction costs")
     interval_rows = observations.iloc[1:]
     active = interval_rows["held_direction_from_prior_date"].ne(0)
     denominator = len(interval_rows)
@@ -474,7 +546,9 @@ def calculate_performance_metrics(
             "annualised_volatility_currency_approx": annual_vol,
             "sharpe_ratio_on_approx_pnl": sharpe,
             "maximum_drawdown_currency": -float(
-                observations[f"{variant}_drawdown_currency"].min()
+                calculate_drawdown(
+                    observations[f"{variant}_pnl_currency_approx"].cumsum()
+                ).min()
             ),
             "turnover_abs_notional_currency": float(
                 observations["turnover_abs_notional_currency"].sum()
@@ -582,7 +656,7 @@ def save_backtest_outputs(
     *,
     outputs_directory: str | Path | None = None,
 ) -> tuple[Path, Path, Path]:
-    """Write the three requested artifacts beneath ``outputs/``.
+    """Write dated P&L, figure, sensitivity CSV and metadata beneath ``outputs/``.
 
     The dated CSV contains all stated units in column names, the PNG labels P&L
     as an approximation, and the sensitivity CSV reports bp-of-face costs.
@@ -605,6 +679,18 @@ def save_backtest_outputs(
     sensitivity_path = target / "transaction_cost_sensitivity.csv"
     result.observations.to_csv(csv_path, index=True)
     cost_sensitivity.to_csv(sensitivity_path, index=False)
+    metadata = {
+        "config": asdict(result.config),
+        "methodology": result.methodology,
+        "limitations": result.limitations,
+        "start_date": result.observations.index[0].date().isoformat(),
+        "end_date": result.observations.index[-1].date().isoformat(),
+        "observation_count": len(result.observations),
+        "provenance": result.observations.attrs.get("provenance", {}),
+    }
+    (target / "rv_backtest_metadata.json").write_text(
+        json.dumps(metadata, indent=2, allow_nan=False) + "\n", encoding="utf-8"
+    )
     figure = plot_backtest(result)
     try:
         figure.savefig(png_path, dpi=150, bbox_inches="tight")
@@ -684,9 +770,7 @@ def _validate_dated_series(
         raise ValueError(f"{name} contains non-numeric values")
     array = numeric.to_numpy(dtype=float)
     valid = (
-        np.isfinite(array) | np.isnan(array)
-        if allow_missing
-        else np.isfinite(array)
+        np.isfinite(array) | np.isnan(array) if allow_missing else np.isfinite(array)
     )
     if not bool(valid.all()):
         raise ValueError(f"{name} contains invalid values")

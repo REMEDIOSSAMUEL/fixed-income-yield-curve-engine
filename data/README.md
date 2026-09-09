@@ -1,9 +1,14 @@
 # Bundled Treasury yield data
 
-`sample_treasury_yields.csv` is a reproducible offline snapshot of daily U.S.
+[sample_treasury_yields.csv](../fixed_income/sample_data/sample_treasury_yields.csv)
+is a reproducible offline snapshot of daily U.S.
 Treasury constant-maturity series from the Federal Reserve H.15 release,
 retrieved through FRED on 8 September 2026. It contains 124 complete business-
 day rows from 2 January through 28 June 2024.
+
+The CSV lives inside `fixed_income/sample_data/` and is included as package data
+so the offline loader also works after wheel installation. Its observations
+were not changed during the audit.
 
 The CSV stores the source's published **percent per annum** values. The data
 loader divides them by 100 once so all in-memory rates are decimal annual rates.
@@ -29,3 +34,9 @@ Interest Rates, distributed through the Federal Reserve Bank of St. Louis:
 These are constant-maturity yield observations. They are par-yield-like
 statistical series and are not a bootstrapped zero-coupon curve. NSS fits to
 these values are fitted CMT curves, not exact discount curves.
+
+This is a later-retrieved snapshot, not a historical real-time vintage. It does
+not establish which revisions were available on each 2024 date, or the precise
+time a strategy could have observed or traded on the published series. The
+sample is a fixed, short, complete-case maturity universe, not a security-level
+universe suitable for claims about survivorship-free executable returns.

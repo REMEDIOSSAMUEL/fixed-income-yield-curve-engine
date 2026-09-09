@@ -330,18 +330,34 @@ def curve_shape_shock(
 ) -> YieldCurve:
     """Apply a continuous shaped shock to zero-curve nodes.
 
-    Node maturities are years and node shocks are decimal annual rates. The
+    Node maturities are years and node shocks are decimal annual rates. Scenario
+    anchors inside the base curve's range are inserted before bumping, preserving
+    the requested piecewise-linear shock between the original nodes. The
     returned curve retains the base curve's compounding and valuation date.
     See :func:`shape_shock_function` for anchors and sign convention.
     """
     _require_zero_curve(zero_curve)
     normalized_scenario = CurveShapeScenario(scenario)
+    if not isinstance(parameters, ShapeScenarioParameters):
+        raise TypeError("parameters must be ShapeScenarioParameters")
+    anchors = np.array(
+        [
+            parameters.short_maturity_years,
+            parameters.pivot_maturity_years,
+            parameters.long_maturity_years,
+        ]
+    )
+    inside = anchors[
+        (anchors >= zero_curve.maturities_years[0])
+        & (anchors <= zero_curve.maturities_years[-1])
+    ]
+    working_curve = _augment_curve_at_maturities(zero_curve, inside)
     shocks = shape_shock_function(
-        zero_curve.maturities_years, normalized_scenario, parameters=parameters
+        working_curve.maturities_years, normalized_scenario, parameters=parameters
     )
     return _curve_with_values(
-        zero_curve,
-        np.asarray(zero_curve.values) + shocks,
+        working_curve,
+        np.asarray(working_curve.values) + shocks,
         source_suffix=f"{normalized_scenario.value} shaped shock",
     )
 
@@ -570,6 +586,9 @@ def key_rate_dv01_report(
         bumping, ensuring the requested peak is applied exactly even when a key
         was not an original node. Nothing is written automatically; callers may
         save the result as ``outputs/key_rate_dv01.csv``.
+        Reconciliation is a first-order limit, not an exact finite-bump identity:
+        central differences have O(bump_size_bp**2) truncation error, and mixed
+        third derivatives can make the summed key risks differ from parallel risk.
     """
     _require_zero_curve(zero_curve)
     keys = _validate_key_maturities(key_maturities_years)
@@ -821,7 +840,7 @@ def _augment_curve_at_maturities(
         valuation_date=zero_curve.valuation_date,
         compounding=zero_curve.compounding,
         periodic_frequency=zero_curve.periodic_frequency,
-        source=_source_with_suffix(zero_curve.source, "key-rate basis nodes"),
+        source=_source_with_suffix(zero_curve.source, "additional interpolation nodes"),
     )
 
 

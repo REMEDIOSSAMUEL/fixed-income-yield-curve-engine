@@ -25,6 +25,7 @@ from urllib.request import Request, urlopen
 import numpy as np
 import pandas as pd
 
+from fixed_income import __version__
 from fixed_income.curves import CurveRepresentation
 
 PERCENT_TO_DECIMAL = 0.01
@@ -325,7 +326,7 @@ def fetch_fred_treasury_yields(
         params["coed"] = requested_end.isoformat()
     request = Request(
         f"{FRED_SOURCE_URL}?{urlencode(params, safe=',')}",
-        headers={"User-Agent": "fixed-income-yield-curve-engine/0.1"},
+        headers={"User-Agent": f"fixed-income-yield-curve-engine/{__version__}"},
     )
     try:
         response = opener(request, timeout=float(timeout_seconds))

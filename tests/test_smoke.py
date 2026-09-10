@@ -9,8 +9,12 @@ import fixed_income
 
 
 def test_package_imports() -> None:
-    """The package exposes its initial version metadata."""
-    assert fixed_income.__version__ == "0.1.0"
+    """The package version agrees with the release metadata."""
+    import tomllib
+
+    project_root = Path(__file__).resolve().parents[1]
+    metadata = tomllib.loads((project_root / "pyproject.toml").read_text())
+    assert fixed_income.__version__ == metadata["project"]["version"] == "1.0.0"
 
 
 def test_cli_help_runs() -> None:

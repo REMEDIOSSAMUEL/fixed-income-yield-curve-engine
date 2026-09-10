@@ -158,8 +158,8 @@ def classify_residual(
 ) -> str:
     """Classify one decimal yield residual as rich, on-curve, or cheap.
 
-    A residual below the non-negative decimal tolerance is ``rich``; one above
-    it is ``cheap``; a value within the symmetric tolerance is ``on-curve``.
+    A residual below minus the non-negative decimal tolerance is ``rich``; one
+    above plus the tolerance is ``cheap``; a value within it is ``on-curve``.
     Positive/cheap means observed yield exceeds fitted yield. Negative/rich
     means observed yield is below fitted yield.
     """
@@ -385,9 +385,10 @@ def rank_curve_points(
     Residuals are decimal annual yields and are reported in both decimals and
     bp. ``rank_by='residual'`` sorts ascending observed-minus-fitted residual;
     ``rank_by='z_score'`` sorts ascending dimensionless z-score and requires
-    ``z_scores``. Rank one is the richest available point and the last rank is
-    the cheapest. Missing ranking values are retained at the bottom without a
-    rank.
+    ``z_scores``. For residual ranking, rank one is richest and the last rank
+    is cheapest. Z-score ranking instead orders deviations from each tenor's
+    historical residual mean; it need not agree with current rich/cheap labels.
+    Missing ranking values are retained at the bottom without a rank.
 
     A DataFrame input requires ``date`` and is interpreted as dates by tenors.
     A Series is already one cross-section and does not accept ``date``.

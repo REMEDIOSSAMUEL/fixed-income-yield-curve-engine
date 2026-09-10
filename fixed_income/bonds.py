@@ -400,8 +400,9 @@ def yield_to_maturity(
     Args:
         bond: Bond terms; face value and market price share currency units.
         settlement_date: Calendar settlement date before maturity.
-        market_price: Positive clean or dirty currency price, as identified by
-            ``price_type``.
+        market_price: Clean or dirty currency price, as identified by
+            ``price_type``. Dirty price must be positive. A clean price may be
+            zero or negative if adding accrued interest gives positive dirty price.
         price_type: Explicitly ``"clean"`` or ``"dirty"``; there is no default
             because silently mixing price bases is financially unsafe.
         bracket: Optional two-element bracket of decimal nominal annual yields.
@@ -427,7 +428,7 @@ def yield_to_maturity(
     """
     _validate_settlement(bond, settlement_date, allow_maturity=False)
     _validate_finite_number(market_price, "market_price")
-    if market_price <= 0.0:
+    if market_price <= 0.0 and price_type == PriceType.DIRTY:
         raise ValueError("market_price must be greater than zero")
     try:
         normalized_price_type = PriceType(price_type)
@@ -446,6 +447,8 @@ def yield_to_maturity(
         target_dirty_price += accrued_interest(bond, settlement_date)
     if not math.isfinite(target_dirty_price):
         raise ValueError("target dirty price must be finite currency")
+    if target_dirty_price <= 0.0:
+        raise ValueError("target dirty price must be greater than zero")
 
     cash_flows, period_counts = _future_cash_flows_and_period_counts(
         bond, settlement_date

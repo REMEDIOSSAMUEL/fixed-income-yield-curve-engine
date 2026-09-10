@@ -1,4 +1,8 @@
-# Independent repository audit
+# Numerical & Methodology Audit
+
+This is an internal code review with independent numerical checks, not a
+third-party audit. The findings below record the earlier implementation audit;
+the final release pass is recorded separately at the end.
 
 Audit date: 9 September 2026. Scope: AGENTS.md, PROJECT_SPEC.md, README.md,
 pyproject.toml, every package/CLI Python source and test, the full 124-row sample,
@@ -180,8 +184,8 @@ guards, aliases and optional plotting paths; no 100% assurance is claimed.
 
 Environment: Windows, Python 3.12.10, pytest 9.1.1, pytest-cov 7.1.0, coverage
 7.16.0, NumPy 2.5.3, pandas 3.0.5, SciPy 1.18.1 and Matplotlib 3.11.1.
-The configured Python 3.11/3.13 CI environments were inspected but not executed
-in this Windows audit session. The wheel/sample loading check also passed
+The current CI workflow uses Python 3.12 on Ubuntu; it was not executed locally
+in this Windows audit session. The earlier wheel/sample loading check also passed
 offline from an isolated extraction under outputs/.
 
 The reproducible default backtest reports 4 entries, gross approximate P&L
@@ -242,3 +246,66 @@ not verify the originally claimed retrieval timestamp or
 point-in-time vintage. Packaging and subprocess coverage configuration follow
 [setuptools data-file guidance](https://setuptools.pypa.io/en/latest/userguide/datafiles.html)
 and [pytest-cov subprocess guidance](https://pytest-cov.readthedocs.io/en/latest/subprocess-support.html).
+
+## Final v1.0.0 release pass (9 September 2026)
+
+The complete source, tests, specification, data, documentation, CLI and static
+charts were reviewed again. This pass preserves the strategy, thresholds, sample
+dates and observed yields. It introduces no additional financial models.
+
+One pricing-domain inconsistency was reproduced before correction: a regular
+10% coupon bond settling on 15 April 2025 and maturing on 15 January 2026 has
+dirty price 0.97775533 and accrued interest 2.48618785 per 100 face at nominal
+annual decimal YTM 100. The resulting clean price -1.50843252 was accepted by
+the pricer but rejected by the inverse solver. The solver now accepts any finite
+clean price whose clean-plus-accrued total is positive, while rejecting zero or
+negative dirty targets. This is an extreme numerical-domain test, not a market
+yield assumption. Three regression cases cover the round trip and invalid totals;
+a zero-clean-price inversion was also checked separately.
+
+Release housekeeping adds the standard MIT license (2026 Samuel Remedios),
+consistent 1.0.0 package/project versioning, a version-derived HTTP user agent,
+SPDX license metadata and its required setuptools minimum, a working test badge,
+and ignore rules for local environment-file variants. Stale internal-audit and
+z-score rich/cheap wording was corrected. The existing GitHub Actions workflow
+remains unchanged; its latest Tests run was successful before these local edits.
+
+The existing editable environment was retained. Editable installation succeeded
+with `python -m pip install -e ".[dev]" --no-deps --no-build-isolation`, using
+already installed dependencies and build tooling. Old ignored source-tree
+egg-info initially shadowed installed metadata and was regenerated with
+setuptools. Both package and installed metadata now report 1.0.0. No dependency
+upgrade or environment replacement was needed.
+
+The initial complete release suite passed 202 tests with zero failures in
+142.62 seconds. The coverage run also passed all 202 tests with zero failures in
+195.29 seconds: 84.96% statement coverage (2,526 statements, 380 missed), including
+CLI subprocesses. Python 3.12.10 and pip 26.2.1 were used. Ruff lint and format
+checks, compileall, import/version checks and pip check passed. The full test
+suite remains offline; live source inspection was separate from those tests.
+
+Standalone `--help`, `demo --offline`, `backtest --offline`, `curve --offline`,
+`bond`, `risk --offline`, `pca --offline` and `relative-value --offline` all
+completed successfully. An invalid YTM produced an argparse error without a
+traceback. The demo reproduced the README figures, including 124 successful NSS
+fits, gross approximate P&L 1.26465 currency and net -18.37072 currency.
+
+Final artifact inspection confirmed seven non-empty CSVs: eight scenario rows,
+four key-rate rows, ten residual rows, 124 calibration rows, 124 ledger rows,
+eleven metric rows and four cost scenarios. No numeric infinity was present.
+Missing fields were confined to the documented 60-observation signal warm-up,
+the initial row with no preceding interval, non-applicable scenario parameters,
+and empty active-bound lists. Gross minus costs equals net, cumulative P&L
+reconciles to the dated ledger, target DV01 is zero within numerical precision,
+and terminal targets are flat. The key-rate sum differs from central parallel
+DV01 by -2.01553e-9 currency/bp, consistent with finite-bump truncation error.
+The metadata JSON records the default settings and provenance. All three PNGs
+were non-empty and byte-for-byte identical to the visually inspected README
+assets, so no static images needed replacing.
+
+The continuation on 10 September confirmed the existing diff and artifacts;
+completed test runs and generated results were preserved. The repository is
+ready for a public v1.0.0 portfolio release within the stated research scope.
+This conclusion is not a certification of market conventions, executable P&L,
+parameter stability or future performance. Git history, tags, releases and
+repository settings remain entirely under the owner's control.

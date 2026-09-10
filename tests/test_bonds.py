@@ -434,3 +434,25 @@ def test_price_underflow_is_rejected_instead_of_reported_as_zero() -> None:
     bond = FixedRateBond(date(2025, 1, 15), date(3025, 1, 15), 0.0)
     with pytest.raises(ArithmeticError, match="numeric range"):
         dirty_price_from_ytm(bond, bond.accrual_start_date, 10.0)
+
+
+def test_negative_clean_price_round_trip_with_positive_dirty_price() -> None:
+    """Accrued interest can exceed PV at extreme yields without invalidating YTM."""
+    bond = FixedRateBond(date(2025, 1, 15), date(2026, 1, 15), 0.1)
+    settlement = date(2025, 4, 15)
+    clean = clean_price_from_ytm(bond, settlement, 100.0)
+    assert clean < 0.0
+    assert clean + accrued_interest(bond, settlement) > 0.0
+    assert yield_to_maturity(
+        bond, settlement, clean, price_type="clean"
+    ) == pytest.approx(100.0, rel=1e-12)
+
+
+@pytest.mark.parametrize("dirty_target", [0.0, -1.0])
+def test_clean_price_requires_positive_total_dirty_price(dirty_target: float) -> None:
+    """A non-positive full price cannot match positive future cash flows."""
+    bond = FixedRateBond(date(2025, 1, 15), date(2026, 1, 15), 0.1)
+    settlement = date(2025, 4, 15)
+    clean = dirty_target - accrued_interest(bond, settlement)
+    with pytest.raises(ValueError, match="dirty price must be greater than zero"):
+        yield_to_maturity(bond, settlement, clean, price_type="clean")

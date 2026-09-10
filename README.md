@@ -1,5 +1,7 @@
 # Fixed-Income Yield Curve & Relative-Value Engine
 
+[![Tests](https://github.com/REMEDIOSSAMUEL/fixed-income-yield-curve-engine/actions/workflows/tests.yml/badge.svg)](https://github.com/REMEDIOSSAMUEL/fixed-income-yield-curve-engine/actions/workflows/tests.yml)
+
 ## Overview
 
 This repository is a transparent Python research engine for nominal fixed-rate
@@ -311,9 +313,7 @@ bond = FixedRateBond(
 settlement = date(2024, 6, 28)
 ytm = 0.0436
 
-dirty_price = price_from_ytm(
-    bond, settlement, ytm, price_type=PriceType.DIRTY
-)
+dirty_price = price_from_ytm(bond, settlement, ytm, price_type=PriceType.DIRTY)
 currency_dv01_per_bp = dv01(bond, settlement, ytm)
 ```
 
@@ -379,7 +379,7 @@ tests/                  offline unit, numerical identity, and CLI tests
 docs/assets/            stable README charts
 outputs/                generated, gitignored run artifacts
 PROJECT_SPEC.md         mathematical and validation specification
-docs/AUDIT.md           independent audit and verification record
+docs/AUDIT.md           numerical and methodology audit record
 ```
 
 ## Testing
@@ -441,5 +441,7 @@ pushes and pull requests.
   but do not establish a global optimum or stable economic parameter meaning.
 
 See [PROJECT_SPEC.md](PROJECT_SPEC.md) for the full mathematical specification
-and [docs/AUDIT.md](docs/AUDIT.md) for the independent code and methodology
+and [docs/AUDIT.md](docs/AUDIT.md) for the internal numerical and methodology
 audit.
+
+Released under the [MIT License](LICENSE).

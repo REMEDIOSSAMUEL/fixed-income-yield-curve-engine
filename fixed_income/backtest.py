@@ -59,7 +59,8 @@ class BacktestConfig:
             ``None`` means ``lookback``.
         ddof: Degrees of freedom used for the historical standard deviation.
         entry_z: Positive dimensionless absolute entry threshold. Equality
-            enters: ``z >= entry_z`` is cheap and ``z <= -entry_z`` is rich.
+            enters: ``z >= entry_z`` buys the belly and ``z <= -entry_z`` sells
+            it. These compare residuals with their trailing mean, not with zero.
         exit_z: Non-negative dimensionless exit threshold strictly below
             ``entry_z``. Long positions exit at ``z <= exit_z`` and shorts at
             ``z >= -exit_z``, including jumps across the exit band. An opposite
